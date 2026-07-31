@@ -253,6 +253,7 @@
   .stock-ok{color:var(--in);}
   .tag.bodega-k{background:#132a3a;color:#7dd3fc;}
   .tag.bodega-r{background:#2a1e3a;color:#c4b5fd;}
+  .tag.bodega-c{background:#1a2e1a;color:#86efac;}
   .serial-chip{
     display:inline-block;font-family:var(--mono);font-size:11px;background:var(--surface-3);
     color:var(--text-dim);padding:1px 7px;border-radius:4px;margin-right:4px;
@@ -291,8 +292,8 @@
    Supabase (Project Settings → API). Sin esto, la app no podrá
    guardar ni leer datos.
    --------------------------------------------------------- */
-const SUPABASE_URL = 'https://iuporeokmezetwtsmkrv.supabase.co';
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Iml1cG9yZW9rbWV6ZXR3dHNta3J2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUzMjc3MzIsImV4cCI6MjEwMDkwMzczMn0.iZLCtrAaYfRTESOh3xkt3dtyQT92kFBLp2hzE88EmhE';
+const SUPABASE_URL = 'https://dodccjdcgjeyxdeorogx.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_H3d-O_P7ozBwKt1l2U2j1Q_nBkj6Tos';
 
 let supabaseClient = null;
 function getSupabase(){
@@ -313,8 +314,13 @@ const KEYS = {
   categorias: 'inv:categorias',
 };
 
-const BODEGAS = ['Bodega Kennedy', 'Bodega Rotonda'];
-function bodegaTagClass(b){ return b === 'Bodega Kennedy' ? 'bodega-k' : 'bodega-r'; }
+const BODEGAS = ['Bodega Kennedy', 'Bodega Rotonda', 'Bodega Cuenca'];
+function bodegaTagClass(b){
+  if(b === 'Bodega Kennedy') return 'bodega-k';
+  if(b === 'Bodega Rotonda') return 'bodega-r';
+  return 'bodega-c';
+}
+const OPERADORES = ['Operador 1', 'Operador 2', 'Operador 3', 'Operador 4', 'Operador 5'];
 
 let state = {
   loaded: false,
@@ -332,16 +338,17 @@ let state = {
   workBodega: { ingreso: BODEGAS[0], salida: BODEGAS[0] },
   manualForm: {
     ingreso: { codigo: '', varianteId: '', cantidad: 1, fecha: todayStr(), notas: '', numerosSerie: '',
-               proveedor: '', iva: 'no', modoValor: 'unitario', valor: '' },
+               proveedor: '', iva: 'no', modoValor: 'unitario', valor: '', operador: '' },
     salida:  { itemId: '', varianteId: '', cantidad: 1, fecha: todayStr(), notas: '', numerosSerie: '',
                modoValor: 'unitario', valor: '' },
   },
   // traslados
-  traslado: { bodegaDestino: BODEGAS[1], scanBuffer: '', busqueda: '', cola: [], notas: '',
+  traslado: { bodegaDestino: BODEGAS[1], scanBuffer: '', busqueda: '', cola: [], notas: '', operador: '',
               manual: { itemId: '', varianteId: '', bodegaOrigen: BODEGAS[0], serial: '' } },
   // salida (por búsqueda de serie, sin escaneo obligatorio)
   salida: { bodega: BODEGAS[0], busqueda: '', cola: [], notas: '', modoVenta: 'unitario', precioVenta: '',
-            bulk: { itemId: '', varianteId: '', cantidad: 1 } },
+            factura: '', operador: '',
+            bulk: { itemId: '', varianteId: '', cantidad: 1, factura: '', operador: '' } },
   // filtros movimientos
   filtro: { itemId: '', tipo: '', desde: '', hasta: '', texto: '', bodega: '', serie: '' },
   editingMov: null,
@@ -377,9 +384,11 @@ async function storageGet(key, fallback){
   if(!sb) return fallback;
   try{
     const { data, error } = await sb.from('app_storage').select('value').eq('key', key).maybeSingle();
-    if(error || !data) return fallback;
+    if(error){ console.error('[Supabase] Error al leer "'+key+'":', error); return fallback; }
+    if(!data) return fallback;
     return data.value;
   }catch(e){
+    console.error('[Supabase] Excepción al leer "'+key+'":', e);
     return fallback;
   }
 }
@@ -388,8 +397,9 @@ async function storageSet(key, value){
   if(!sb){ showToast('No hay conexión con la base de datos. Revisa la configuración de Supabase.', true); return; }
   try{
     const { error } = await sb.from('app_storage').upsert({ key, value, updated_at: new Date().toISOString() });
-    if(error) showToast('No se pudo guardar en la base de datos: ' + error.message, true);
+    if(error){ console.error('[Supabase] Error al guardar "'+key+'":', error); showToast('No se pudo guardar en la base de datos: ' + error.message, true); }
   }catch(e){
+    console.error('[Supabase] Excepción al guardar "'+key+'":', e);
     showToast('No se pudo guardar en la base de datos.', true);
   }
 }
@@ -451,6 +461,15 @@ function showToast(msg, isErr){
 }
 
 /* ---------------- data helpers ---------------- */
+function datalistOpcionesCodigos(){
+  return allVariantes().map(v => `<option value="${v.sku}">${v.itemNombre} — ${v.descripcion}</option>`).join('');
+}
+function datalistOpcionesNombres(){
+  const vs = allVariantes();
+  const opts = new Set();
+  vs.forEach(v => { opts.add(v.itemNombre); opts.add(v.sku); });
+  return [...opts].map(o => `<option value="${o}"></option>`).join('');
+}
 function allVariantes(){
   const out = [];
   for(const item of state.catalogo){
@@ -631,6 +650,7 @@ async function registrarMovimiento(m){
     fecha: m.fecha || todayStr(),
     registradoEn: new Date().toISOString(),
     usuario: state.currentUser.username,
+    operador: m.operador || '',
     origen: m.origen,
     notas: m.notas || '',
     numerosSerie: m.numerosSerie || [],
@@ -654,6 +674,7 @@ async function registrarMovimiento(m){
   if(m.tipo === 'salida'){
     mov.precioVentaTotal = (m.precioVentaTotal!=null && m.precioVentaTotal!=='') ? Number(m.precioVentaTotal) : null;
     mov.ganancia = (m.ganancia!=null && m.ganancia!=='') ? Number(m.ganancia) : null;
+    mov.factura = m.factura || '';
   }
   state.movimientos = [mov, ...state.movimientos];
   await storageSet(KEYS.movimientos, state.movimientos);
@@ -738,7 +759,7 @@ function bindLogin(){
     }
     state.loginError = '';
     state.currentUser = found;
-    state.view = 'dashboard';
+    state.view = found.role === 'admin' ? 'dashboard' : 'stock';
     render();
   };
   btn.onclick = doLogin;
@@ -748,7 +769,7 @@ function bindLogin(){
 
 /* ================= SHELL ================= */
 const NAV_ITEMS = [
-  { id:'dashboard', label:'Panel', icon:'▤', roles:['admin','operador'] },
+  { id:'dashboard', label:'Panel', icon:'▤', roles:['admin'] },
   { id:'ingreso', label:'Ingreso', icon:'↓', roles:['admin'] },
   { id:'salida', label:'Salida', icon:'↑', roles:['admin'] },
   { id:'traslados', label:'Traslados', icon:'⇄', roles:['admin'] },
@@ -757,7 +778,7 @@ const NAV_ITEMS = [
   { id:'catalogo', label:'Producto', icon:'◧', roles:['admin'] },
   { id:'usuarios', label:'Usuarios', icon:'☺', roles:['admin'] },
 ];
-const ADMIN_ONLY_VIEWS = ['ingreso','salida','traslados','catalogo','usuarios'];
+const ADMIN_ONLY_VIEWS = ['dashboard','ingreso','salida','traslados','catalogo','usuarios'];
 
 function renderShell(){
   const u = state.currentUser;
@@ -882,8 +903,15 @@ function renderMovForm(tipo){
   const form = state.manualForm[tipo];
   const codigoMatch = form.codigo ? findVarianteBySku(form.codigo) : null;
 
-  const camposFinancierosYSerie = (prefix, seriesValue, ivaValue, modoValue, valorValue) => `
+  const camposFinancierosYSerie = (prefix, seriesValue, ivaValue, modoValue, valorValue, operadorValue) => `
     <div class="row-flex" style="margin-top:10px;">
+      <div class="field" style="flex:0 0 190px;">
+        <label>Operador <span style="color:var(--out);">*</span></label>
+        <select id="${prefix}-operador">
+          <option value="">Seleccionar…</option>
+          ${OPERADORES.map(o=>`<option value="${o}" ${operadorValue===o?'selected':''}>${o}</option>`).join('')}
+        </select>
+      </div>
       <div class="field">
         <label>Proveedor</label>
         <input type="text" id="${prefix}-proveedor" placeholder="Ej: Distribuidora XYZ" value=""/>
@@ -946,7 +974,7 @@ function renderMovForm(tipo){
               <button class="btn btn-in" id="scan-confirm-${tipo}">Confirmar ingreso</button>
               <button class="btn btn-ghost" id="scan-cancel-${tipo}">Cancelar</button>
             </div>
-            ${camposFinancierosYSerie('scan-'+tipo, pending.numerosSerie, pending.iva, pending.modoValor, pending.valor)}
+            ${camposFinancierosYSerie('scan-'+tipo, pending.numerosSerie, pending.iva, pending.modoValor, pending.valor, pending.operador)}
             <div class="field" style="margin-top:10px;">
               <label>Notas</label>
               <input type="text" id="scan-notas-${tipo}" placeholder="Notas de este movimiento…" value="${pending.notas||''}"/>
@@ -964,7 +992,8 @@ function renderMovForm(tipo){
       <div class="row-flex">
         <div class="field">
           <label>Código de producto</label>
-          <input type="text" id="manual-codigo-${tipo}" placeholder="Escribe el código del producto…" value="${form.codigo||''}" autocomplete="off"/>
+          <input type="text" id="manual-codigo-${tipo}" placeholder="Escribe el código del producto…" value="${form.codigo||''}" autocomplete="off" list="datalist-codigo-${tipo}"/>
+          <datalist id="datalist-codigo-${tipo}">${datalistOpcionesCodigos()}</datalist>
           <div id="manual-codigo-preview-${tipo}" style="margin-top:6px;font-size:12px;">
             ${codigoMatch ? `<span style="color:var(--in);">✓ ${codigoMatch.itemNombre} — ${codigoMatch.descripcion}${codigoMatch.precioVenta!=null?' · PVP '+formatoMoneda(codigoMatch.precioVenta):''}</span>`
               : (form.codigo ? `<span style="color:var(--out);">No se encontró ese código. Créalo primero en "Producto".</span>` : '')}
@@ -987,7 +1016,7 @@ function renderMovForm(tipo){
           </select>
         </div>
       </div>
-      ${camposFinancierosYSerie('manual-'+tipo, form.numerosSerie, form.iva, form.modoValor, form.valor)}
+      ${camposFinancierosYSerie('manual-'+tipo, form.numerosSerie, form.iva, form.modoValor, form.valor, form.operador)}
       <div class="row-flex" style="margin-top:14px;">
         <div class="field">
           <label>Notas</label>
@@ -1079,9 +1108,22 @@ function renderSalida(){
           </div>
         </div>
         <div id="salida-ganancia-preview" class="mono" style="font-size:12px;color:var(--text-dim);margin-top:6px;"></div>
+        <div class="row-flex" style="margin-top:12px;max-width:520px;">
+          <div class="field">
+            <label>Factura / Comprobante <span style="color:var(--out);">*</span></label>
+            <input type="text" id="salida-factura" value="${s.factura||''}" placeholder="Ej: FAC-001-2024"/>
+          </div>
+          <div class="field">
+            <label>Operador <span style="color:var(--out);">*</span></label>
+            <select id="salida-operador">
+              <option value="">Seleccionar…</option>
+              ${OPERADORES.map(o=>`<option value="${o}" ${s.operador===o?'selected':''}>${o}</option>`).join('')}
+            </select>
+          </div>
+        </div>
         <div class="field" style="margin-top:12px;max-width:420px;">
           <label>Notas (opcional)</label>
-          <input type="text" id="salida-notas" value="${s.notas||''}" placeholder="Ej: pedido cliente, factura #…"/>
+          <input type="text" id="salida-notas" value="${s.notas||''}" placeholder="Ej: pedido cliente…"/>
         </div>
         <div style="margin-top:12px;">
           <button class="btn btn-out" id="salida-confirmar">Confirmar salida de ${s.cola.length} equipo(s)</button>
@@ -1113,6 +1155,19 @@ function renderSalida(){
         <div class="field" style="flex:0 0 120px;">
           <label>Cantidad</label>
           <input type="number" min="1" id="salida-bulk-cant" value="${s.bulk.cantidad}"/>
+        </div>
+      </div>
+      <div class="row-flex" style="margin-top:14px;">
+        <div class="field">
+          <label>Factura / Comprobante <span style="color:var(--out);">*</span></label>
+          <input type="text" id="salida-bulk-factura" value="${s.bulk.factura||''}" placeholder="Ej: FAC-001-2024"/>
+        </div>
+        <div class="field">
+          <label>Operador <span style="color:var(--out);">*</span></label>
+          <select id="salida-bulk-operador">
+            <option value="">Seleccionar…</option>
+            ${OPERADORES.map(o=>`<option value="${o}" ${s.bulk.operador===o?'selected':''}>${o}</option>`).join('')}
+          </select>
         </div>
       </div>
       <div style="margin-top:14px;">
@@ -1188,6 +1243,15 @@ function renderTraslados(){
             </tr>`).join('')}
           </tbody>
         </table>
+        <div class="row-flex" style="margin-top:12px;max-width:420px;">
+          <div class="field">
+            <label>Operador <span style="color:var(--out);">*</span></label>
+            <select id="traslado-operador">
+              <option value="">Seleccionar…</option>
+              ${OPERADORES.map(o=>`<option value="${o}" ${t.operador===o?'selected':''}>${o}</option>`).join('')}
+            </select>
+          </div>
+        </div>
         <div class="field" style="margin-top:12px;max-width:420px;">
           <label>Notas del traslado (opcional)</label>
           <input type="text" id="traslado-notas" value="${t.notas||''}" placeholder="Ej: reposición de stock, pedido cliente…"/>
@@ -1205,7 +1269,7 @@ function renderTraslados(){
     <div class="panel-body" style="padding:0;">
       ${historial.length===0 ? `<div class="empty-state">Todavía no se ha registrado ningún traslado.</div>` : `
       <table>
-        <thead><tr><th>Fecha</th><th>Ítem</th><th>SKU</th><th>N° Serie</th><th>Bodega origen → destino</th><th>Usuario</th><th>Notas</th></tr></thead>
+        <thead><tr><th>Fecha</th><th>Ítem</th><th>SKU</th><th>N° Serie</th><th>Bodega origen → destino</th><th>Usuario</th><th>Operador</th><th>Notas</th></tr></thead>
         <tbody>
           ${historial.map(m=>{
             const v = findVariante(m.varianteId);
@@ -1216,6 +1280,7 @@ function renderTraslados(){
               <td class="mono" style="font-size:11.5px;color:var(--text-dim);">${(m.numerosSerie||[]).join(', ')}</td>
               <td style="font-size:12.5px;"><span class="tag ${bodegaTagClass(m.bodegaOrigen)}">${m.bodegaOrigen}</span> → <span class="tag ${bodegaTagClass(m.bodegaDestino)}">${m.bodegaDestino}</span></td>
               <td>${m.usuario}${m.editado?' <span class="tag edited">editado</span>':''}</td>
+              <td style="font-size:12px;color:var(--text-dim);">${m.operador||'—'}</td>
               <td style="color:var(--text-dim);">${m.notas||''}</td>
             </tr>`;
           }).join('')}
@@ -1237,8 +1302,9 @@ function renderStock(){
     <div class="panel-head">
       <div class="panel-title">Stock por variante y bodega</div>
       <div style="display:flex;gap:8px;">
-        <input class="field" id="stock-search" placeholder="Buscar por ítem, SKU o descripción…" value="${state.filtro.texto||''}"
+        <input class="field" id="stock-search" placeholder="Buscar por ítem, SKU o descripción…" value="${state.filtro.texto||''}" list="datalist-stock-nombres"
           style="background:var(--surface-2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:8px 12px;font-size:13px;width:260px;"/>
+        <datalist id="datalist-stock-nombres">${datalistOpcionesNombres()}</datalist>
         <button class="btn btn-xls" id="export-stock-btn">⬇ Exportar a Excel</button>
       </div>
     </div>
@@ -1308,6 +1374,7 @@ function renderMovimientos(){
   const f = state.filtro;
   const lista = filtrarMovimientos();
   const canEdit = state.currentUser.role === 'admin';
+  const verDinero = state.currentUser.role === 'admin';
 
   return `
   <div class="panel">
@@ -1350,7 +1417,7 @@ function renderMovimientos(){
     <div class="panel-body" style="padding:0;">
       ${lista.length===0 ? `<div class="empty-state">No hay movimientos con estos filtros.</div>` : `
       <table>
-        <thead><tr><th>Fecha</th><th>Ítem / Variante</th><th>Tipo</th><th>Cant.</th><th>Bodega</th><th>N° Serie</th><th>Valor</th><th>Ganancia</th><th>Origen</th><th>Usuario</th><th>Notas</th><th></th></tr></thead>
+        <thead><tr><th>Fecha</th><th>Ítem / Variante</th><th>Tipo</th><th>Cant.</th><th>Bodega</th><th>N° Serie</th>${verDinero?'<th>Valor</th><th>Ganancia</th>':''}<th>Origen</th><th>Usuario</th><th>Operador</th><th>Notas</th><th></th></tr></thead>
         <tbody>${lista.map(m=>{
           const v = findVariante(m.varianteId);
           const bodegaTxt = m.tipo==='traslado'
@@ -1363,10 +1430,12 @@ function renderMovimientos(){
             <td class="mono" style="font-weight:700;">${m.cantidad}</td>
             <td style="font-size:12px;">${bodegaTxt}</td>
             <td class="mono" style="font-size:11.5px;color:var(--text-dim);max-width:130px;">${(m.numerosSerie||[]).join(', ')}</td>
+            ${verDinero ? `
             <td class="mono" style="font-size:12px;">${m.valorTotal!=null ? formatoMoneda(m.valorTotal) : '—'}</td>
-            <td class="mono" style="font-size:12px;${m.ganancia!=null?(m.ganancia>=0?'color:var(--in)':'color:var(--out)'):''}">${m.ganancia!=null ? formatoMoneda(m.ganancia) : '—'}</td>
+            <td class="mono" style="font-size:12px;${m.ganancia!=null?(m.ganancia>=0?'color:var(--in)':'color:var(--out)'):''}">${m.ganancia!=null ? formatoMoneda(m.ganancia) : '—'}</td>` : ''}
             <td><span class="tag ${m.origen}">${m.origen==='scanner'?'pistola':'manual'}</span></td>
             <td>${m.usuario}</td>
+            <td style="font-size:12px;color:var(--text-dim);">${m.operador||'—'}</td>
             <td style="color:var(--text-dim);max-width:140px;">${m.notas||''} ${m.editado?'<span class="tag edited">editado</span>':''}</td>
             <td>${canEdit ? `<button class="link-btn" data-edit-mov="${m.id}">Editar</button>` : ''}</td>
           </tr>`;
@@ -1615,10 +1684,11 @@ function exportarStockExcel(){
 }
 
 function exportarMovimientosExcel(lista){
+  const verDinero = state.currentUser.role === 'admin';
   const filas = lista.map(m => {
     const v = findVariante(m.varianteId);
     const bodegaTxt = m.tipo==='traslado' ? '' : (m.bodega || '');
-    return {
+    const fila = {
       'Fecha': m.fecha, 'Ítem': v ? v.itemNombre : '(variante eliminada)', 'SKU': v ? v.sku : '',
       'Tipo': m.tipo === 'ingreso' ? 'Ingreso' : m.tipo === 'salida' ? 'Salida' : 'Traslado',
       'Cantidad': m.cantidad,
@@ -1626,16 +1696,23 @@ function exportarMovimientosExcel(lista){
       'Bodega origen (traslado)': m.bodegaOrigen || '',
       'Bodega destino (traslado)': m.bodegaDestino || '',
       'Números de serie': (m.numerosSerie||[]).join(', '),
-      'Proveedor': m.proveedor || '',
-      'Graba IVA': m.iva === 'si' ? 'Sí' : (m.iva === 'no' ? 'No' : ''),
-      'Valor unitario': m.valorUnitario!=null ? m.valorUnitario : '',
-      'Valor total sin IVA': m.tipo==='ingreso' && m.valorTotal!=null ? valorSinIvaDeIngreso(m) : (m.valorTotal!=null?m.valorTotal:''),
-      'Valor total con IVA': m.tipo==='ingreso' && m.valorTotal!=null ? Number(m.valorTotal) : '',
-      'Precio de Venta': m.precioVentaTotal!=null ? m.precioVentaTotal : '',
-      'Ganancia': m.ganancia!=null ? m.ganancia : '',
-      'Origen': m.origen === 'scanner' ? 'Pistola' : 'Manual', 'Usuario': m.usuario,
-      'Notas': m.notas || '', 'Editado': m.editado ? 'Sí' : 'No',
     };
+    if(verDinero){
+      fila['Proveedor'] = m.proveedor || '';
+      fila['Graba IVA'] = m.iva === 'si' ? 'Sí' : (m.iva === 'no' ? 'No' : '');
+      fila['Valor unitario'] = m.valorUnitario!=null ? m.valorUnitario : '';
+      fila['Valor total sin IVA'] = m.tipo==='ingreso' && m.valorTotal!=null ? valorSinIvaDeIngreso(m) : (m.valorTotal!=null?m.valorTotal:'');
+      fila['Valor total con IVA'] = m.tipo==='ingreso' && m.valorTotal!=null ? Number(m.valorTotal) : '';
+      fila['Factura/Comprobante'] = m.factura || '';
+      fila['Precio de Venta'] = m.precioVentaTotal!=null ? m.precioVentaTotal : '';
+      fila['Ganancia'] = m.ganancia!=null ? m.ganancia : '';
+    }
+    fila['Origen'] = m.origen === 'scanner' ? 'Pistola' : 'Manual';
+    fila['Usuario'] = m.usuario;
+    fila['Operador'] = m.operador || '';
+    fila['Notas'] = m.notas || '';
+    fila['Editado'] = m.editado ? 'Sí' : 'No';
+    return fila;
   });
   descargarExcel(filas, 'Movimientos', `movimientos_${todayStr()}.xlsx`);
 }
@@ -1700,7 +1777,10 @@ function bindMovForm(tipo){
       const valorEl = document.getElementById(`scan-${tipo}-valor`);
       const ivaEl = document.getElementById(`scan-${tipo}-iva`);
       const proveedorEl = document.getElementById(`scan-${tipo}-proveedor`);
+      const operadorEl = document.getElementById(`scan-${tipo}-operador`);
       const iva = ivaEl ? ivaEl.value : 'no';
+      const operador = operadorEl ? operadorEl.value : '';
+      if(!operador){ showToast('Debes seleccionar el Operador que realiza este ingreso.', true); return; }
       const series = parseSeries(seriesEl ? seriesEl.value : '');
       if(series.length===0 && !(sinSerieEl && sinSerieEl.checked)){
         showToast('El número de serie es obligatorio. Marca "Equipo sin seriado" si este producto no tiene serie.', true);
@@ -1711,7 +1791,7 @@ function bindMovForm(tipo){
       await registrarMovimiento({
         varianteId: p.id, tipo, cantidad: cant, fecha: todayStr(), origen: 'scanner',
         bodega: state.workBodega[tipo], numerosSerie: series,
-        notas: notasEl ? notasEl.value : '', iva,
+        notas: notasEl ? notasEl.value : '', iva, operador,
         proveedor: proveedorEl ? proveedorEl.value : '',
         valorUnitario, valorTotal,
       });
@@ -1757,9 +1837,12 @@ function bindMovForm(tipo){
     const valorEl = document.getElementById(`manual-${tipo}-valor`);
     const ivaEl = document.getElementById(`manual-${tipo}-iva`);
     const proveedorEl = document.getElementById(`manual-${tipo}-proveedor`);
+    const operadorEl = document.getElementById(`manual-${tipo}-operador`);
     const iva = ivaEl ? ivaEl.value : 'no';
+    const operador = operadorEl ? operadorEl.value : '';
     if(!codigo || !match){ showToast('Escribe un código de producto válido (debe existir en "Producto").', true); return; }
     if(cantidad <= 0){ showToast('La cantidad debe ser mayor a 0.', true); return; }
+    if(!operador){ showToast('Debes seleccionar el Operador que realiza este ingreso.', true); return; }
     if(series.length===0 && !(sinSerieEl && sinSerieEl.checked)){
       showToast('El número de serie es obligatorio. Marca "Equipo sin seriado" si este producto no tiene serie.', true);
       return;
@@ -1767,10 +1850,10 @@ function bindMovForm(tipo){
     const { valorUnitario, valorTotal } = calcularValores(modoValorEl.value, valorEl.value, cantidad, iva);
     await registrarMovimiento({
       varianteId: match.id, tipo, cantidad, fecha, notas, origen: 'manual', bodega, numerosSerie: series,
-      iva, proveedor: proveedorEl ? proveedorEl.value : '', valorUnitario, valorTotal,
+      iva, operador, proveedor: proveedorEl ? proveedorEl.value : '', valorUnitario, valorTotal,
     });
     state.manualForm[tipo] = { codigo: '', varianteId: '', cantidad: 1, fecha: todayStr(), notas: '', numerosSerie: '',
-      proveedor: '', iva: 'no', modoValor: 'unitario', valor: '' };
+      proveedor: '', iva: 'no', modoValor: 'unitario', valor: '', operador: '' };
     showToast('Ingreso registrado correctamente.');
     render();
   };
@@ -1842,6 +1925,12 @@ function bindSalida(){
   if(confirmarBtn) confirmarBtn.onclick = async () => {
     const modoEl = document.getElementById('salida-modoventa');
     const precioEl = document.getElementById('salida-precioventa');
+    const facturaEl = document.getElementById('salida-factura');
+    const operadorEl = document.getElementById('salida-operador');
+    const factura = facturaEl ? facturaEl.value.trim() : '';
+    const operador = operadorEl ? operadorEl.value : '';
+    if(!factura){ showToast('Debes indicar la Factura/Comprobante de esta salida.', true); return; }
+    if(!operador){ showToast('Debes seleccionar el Operador que realiza esta salida.', true); return; }
     const precio = Number(precioEl.value) || 0;
     const precioVentaTotalGlobal = precio ? (modoEl.value==='total' ? precio : precio * s.cola.length) : 0;
     const precioUnitarioPromedio = precio ? precioVentaTotalGlobal / s.cola.length : 0;
@@ -1862,26 +1951,39 @@ function bindSalida(){
       const ganancia = (precio && algunCosto) ? (ventaTotalGrupo - costoTotal) : null;
       await registrarMovimiento({
         varianteId, tipo: 'salida', cantidad: seriales.length, fecha: todayStr(), origen: 'manual',
-        bodega: s.bodega, numerosSerie: seriales, notas: s.notas,
+        bodega: s.bodega, numerosSerie: seriales, notas: s.notas, factura, operador,
         valorUnitario: null, valorTotal: algunCosto ? costoTotal : null,
         precioVentaTotal: ventaTotalGrupo, ganancia,
       });
     }
     showToast(`Salida registrada: ${s.cola.length} equipo(s).`);
-    s.cola = []; s.notas = ''; s.busqueda = ''; s.precioVenta = '';
+    s.cola = []; s.notas = ''; s.busqueda = ''; s.precioVenta = ''; s.factura = ''; s.operador = '';
     render();
   };
+
+  const facturaEl = document.getElementById('salida-factura');
+  if(facturaEl) facturaEl.oninput = () => { s.factura = facturaEl.value; };
+  const operadorEl = document.getElementById('salida-operador');
+  if(operadorEl) operadorEl.onchange = () => { s.operador = operadorEl.value; };
 
   const bulkItemSel = document.getElementById('salida-bulk-item');
   if(bulkItemSel) bulkItemSel.onchange = () => { s.bulk.itemId = bulkItemSel.value; s.bulk.varianteId = ''; render(); };
   const bulkVarSel = document.getElementById('salida-bulk-variante');
   if(bulkVarSel) bulkVarSel.onchange = () => { s.bulk.varianteId = bulkVarSel.value; };
+  const bulkFacturaEl = document.getElementById('salida-bulk-factura');
+  if(bulkFacturaEl) bulkFacturaEl.oninput = () => { s.bulk.factura = bulkFacturaEl.value; };
+  const bulkOperadorEl = document.getElementById('salida-bulk-operador');
+  if(bulkOperadorEl) bulkOperadorEl.onchange = () => { s.bulk.operador = bulkOperadorEl.value; };
   const bulkSubmit = document.getElementById('salida-bulk-submit');
   if(bulkSubmit) bulkSubmit.onclick = async () => {
     const varianteId = document.getElementById('salida-bulk-variante').value;
     const cantidad = Number(document.getElementById('salida-bulk-cant').value) || 0;
+    const factura = document.getElementById('salida-bulk-factura').value.trim();
+    const operador = document.getElementById('salida-bulk-operador').value;
     if(!varianteId){ showToast('Selecciona un ítem y una variante.', true); return; }
     if(cantidad <= 0){ showToast('La cantidad debe ser mayor a 0.', true); return; }
+    if(!factura){ showToast('Debes indicar la Factura/Comprobante de esta salida.', true); return; }
+    if(!operador){ showToast('Debes seleccionar el Operador que realiza esta salida.', true); return; }
     const stockEnBodega = calcStock(varianteId, s.bodega);
     if(cantidad > stockEnBodega){
       showToast(`Solo hay ${stockEnBodega} unidad(es) de esa variante en ${s.bodega}.`, true); return;
@@ -1889,8 +1991,9 @@ function bindSalida(){
     await registrarMovimiento({
       varianteId, tipo: 'salida', cantidad, fecha: todayStr(), origen: 'manual',
       bodega: s.bodega, numerosSerie: [], notas: '', valorUnitario: null, valorTotal: null,
+      factura, operador,
     });
-    s.bulk = { itemId: '', varianteId: '', cantidad: 1 };
+    s.bulk = { itemId: '', varianteId: '', cantidad: 1, factura: '', operador: '' };
     showToast('Salida registrada correctamente.');
     render();
   };
@@ -1931,12 +2034,17 @@ function bindTraslados(){
 
   const notasEl = document.getElementById('traslado-notas');
   if(notasEl) notasEl.oninput = () => { t.notas = notasEl.value; };
+  const operadorEl = document.getElementById('traslado-operador');
+  if(operadorEl) operadorEl.onchange = () => { t.operador = operadorEl.value; };
 
   const vaciarBtn = document.getElementById('traslado-vaciar');
-  if(vaciarBtn) vaciarBtn.onclick = () => { t.cola = []; t.notas = ''; render(); };
+  if(vaciarBtn) vaciarBtn.onclick = () => { t.cola = []; t.notas = ''; t.operador = ''; render(); };
 
   const confirmarBtn = document.getElementById('traslado-confirmar');
   if(confirmarBtn) confirmarBtn.onclick = async () => {
+    const operadorSel = document.getElementById('traslado-operador');
+    const operador = operadorSel ? operadorSel.value : '';
+    if(!operador){ showToast('Debes seleccionar el Operador que realiza este traslado.', true); return; }
     const grupos = {};
     for(const c of t.cola){
       const key = c.varianteId + '|' + c.bodegaOrigen;
@@ -1948,11 +2056,11 @@ function bindTraslados(){
       await registrarMovimiento({
         varianteId: g.varianteId, tipo: 'traslado', cantidad: g.seriales.length,
         fecha: todayStr(), origen: 'scanner', bodegaOrigen: g.bodegaOrigen,
-        bodegaDestino: t.bodegaDestino, numerosSerie: g.seriales, notas: t.notas,
+        bodegaDestino: t.bodegaDestino, numerosSerie: g.seriales, notas: t.notas, operador,
       });
     }
     showToast(`Traslado registrado: ${t.cola.length} equipo(s) a ${t.bodegaDestino}.`);
-    t.cola = []; t.notas = '';
+    t.cola = []; t.notas = ''; t.operador = '';
     render();
   };
 }
@@ -2173,3 +2281,4 @@ loadAll();
 </script>
 </body>
 </html>
+
