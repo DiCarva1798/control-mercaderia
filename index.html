@@ -322,6 +322,29 @@ function bodegaTagClass(b){
 }
 const OPERADORES = ['Operador 1', 'Operador 2', 'Operador 3', 'Operador 4', 'Operador 5'];
 
+/* Código de autorización por operador. No se guarda en texto plano en el
+   código fuente; se compara por huella (hash) para que abrir el archivo
+   no revele los códigos directamente. Esto es una barrera básica de
+   trazabilidad interna, no un sistema de seguridad criptográfico. */
+function hashCodigoOperador(str){
+  let h = 0;
+  for(let i=0;i<str.length;i++){ h = (Math.imul(31,h) + str.charCodeAt(i)) >>> 0; }
+  return h.toString(36);
+}
+const OPERADOR_CODIGOS_HASH = {
+  'Operador 1': 'xpnn',
+  'Operador 2': '10s51',
+  'Operador 3': 'yy7w',
+  'Operador 4': 'yyw0',
+  'Operador 5': 'z0hq',
+};
+function validarCodigoOperador(operador, codigo){
+  if(!operador || !codigo) return false;
+  const esperado = OPERADOR_CODIGOS_HASH[operador];
+  if(!esperado) return false;
+  return hashCodigoOperador(String(codigo).trim()) === esperado;
+}
+
 let state = {
   loaded: false,
   configError: false,
@@ -344,11 +367,11 @@ let state = {
   },
   // traslados
   traslado: { bodegaDestino: BODEGAS[1], scanBuffer: '', busqueda: '', cola: [], notas: '', operador: '',
-              manual: { itemId: '', varianteId: '', bodegaOrigen: BODEGAS[0], serial: '' } },
+              bulk: { itemId: '', varianteId: '', bodegaOrigen: BODEGAS[0], cantidad: 1, operador: '', notas: '' } },
   // salida (por búsqueda de serie, sin escaneo obligatorio)
   salida: { bodega: BODEGAS[0], busqueda: '', cola: [], notas: '', modoVenta: 'unitario', precioVenta: '',
             factura: '', operador: '',
-            bulk: { itemId: '', varianteId: '', cantidad: 1, factura: '', operador: '' } },
+            bulk: { itemId: '', varianteId: '', cantidad: 1, factura: '', operador: '', modoVenta: 'unitario', precioVenta: '' } },
   // filtros movimientos
   filtro: { itemId: '', tipo: '', desde: '', hasta: '', texto: '', bodega: '', serie: '' },
   editingMov: null,
@@ -411,21 +434,7 @@ function defaultUsers(){
   ];
 }
 function defaultCatalogo(){
-  return [
-    { id: uid('it'), tipo: 'consola', nombre: 'PlayStation 5', marca: 'Sony', variantes: [
-      { id: uid('v'), sku: 'PS5-STD-1TB', descripcion: 'PS5 Standard 1TB' },
-      { id: uid('v'), sku: 'PS5-2J-SPIDERFC24', descripcion: 'PS5 + Spiderman 2 + FC24' },
-    ]},
-    { id: uid('it'), tipo: 'consola', nombre: 'Xbox Series X', marca: 'Microsoft', variantes: [
-      { id: uid('v'), sku: 'XSX-STD-1TB', descripcion: 'Xbox Series X 1TB' },
-    ]},
-    { id: uid('it'), tipo: 'consola', nombre: 'Nintendo Switch', marca: 'Nintendo', variantes: [
-      { id: uid('v'), sku: 'NSW-OLED', descripcion: 'Switch modelo OLED' },
-    ]},
-    { id: uid('it'), tipo: 'accesorio', nombre: 'Control inalámbrico', marca: 'Sony', variantes: [
-      { id: uid('v'), sku: 'ACC-DS-BLK', descripcion: 'DualSense negro' },
-    ]},
-  ];
+  return [];
 }
 
 function defaultCategorias(){
@@ -573,6 +582,18 @@ function buscarSerialesDisponibles(query, opts){
 function valorSinIvaDeIngreso(m){
   if(m.valorTotal == null) return null;
   return m.iva === 'si' ? Number(m.valorTotal) / 1.15 : Number(m.valorTotal);
+}
+/* Costo promedio estimado de una variante, calculado a partir de sus
+   ingresos registrados. Se usa para estimar la ganancia en salidas SIN
+   número de serie (donde no se puede rastrear el costo exacto por unidad). */
+function costoPromedioVariante(varianteId){
+  let total = 0, count = 0;
+  for(const m of state.movimientos){
+    if(m.tipo === 'ingreso' && m.varianteId === varianteId && m.valorUnitario != null){
+      total += Number(m.valorUnitario); count++;
+    }
+  }
+  return count > 0 ? total / count : null;
 }
 function valorTotalEnStock(){
   let total = 0;
@@ -912,6 +933,10 @@ function renderMovForm(tipo){
           ${OPERADORES.map(o=>`<option value="${o}" ${operadorValue===o?'selected':''}>${o}</option>`).join('')}
         </select>
       </div>
+      <div class="field" style="flex:0 0 150px;">
+        <label>Código <span style="color:var(--out);">*</span></label>
+        <input type="password" id="${prefix}-codigo-operador" placeholder="••••" autocomplete="off" inputmode="numeric"/>
+      </div>
       <div class="field">
         <label>Proveedor</label>
         <input type="text" id="${prefix}-proveedor" placeholder="Ej: Distribuidora XYZ" value=""/>
@@ -1120,6 +1145,10 @@ function renderSalida(){
               ${OPERADORES.map(o=>`<option value="${o}" ${s.operador===o?'selected':''}>${o}</option>`).join('')}
             </select>
           </div>
+          <div class="field" style="flex:0 0 130px;">
+            <label>Código <span style="color:var(--out);">*</span></label>
+            <input type="password" id="salida-codigo-operador" placeholder="••••" autocomplete="off" inputmode="numeric"/>
+          </div>
         </div>
         <div class="field" style="margin-top:12px;max-width:420px;">
           <label>Notas (opcional)</label>
@@ -1158,6 +1187,20 @@ function renderSalida(){
         </div>
       </div>
       <div class="row-flex" style="margin-top:14px;">
+        <div class="field" style="flex:0 0 190px;">
+          <label>El precio ingresado es…</label>
+          <select id="salida-bulk-modoventa">
+            <option value="unitario" ${s.bulk.modoVenta==='total'?'':'selected'}>Precio por unidad</option>
+            <option value="total" ${s.bulk.modoVenta==='total'?'selected':''}>Total de la venta</option>
+          </select>
+        </div>
+        <div class="field" style="flex:0 0 160px;">
+          <label>Precio de Venta (USD)</label>
+          <input type="number" min="0" step="0.01" id="salida-bulk-precioventa" placeholder="0.00" value="${s.bulk.precioVenta||''}"/>
+        </div>
+      </div>
+      <div id="salida-bulk-ganancia-preview" class="mono" style="font-size:12px;color:var(--text-dim);margin-top:6px;"></div>
+      <div class="row-flex" style="margin-top:14px;">
         <div class="field">
           <label>Factura / Comprobante <span style="color:var(--out);">*</span></label>
           <input type="text" id="salida-bulk-factura" value="${s.bulk.factura||''}" placeholder="Ej: FAC-001-2024"/>
@@ -1168,6 +1211,10 @@ function renderSalida(){
             <option value="">Seleccionar…</option>
             ${OPERADORES.map(o=>`<option value="${o}" ${s.bulk.operador===o?'selected':''}>${o}</option>`).join('')}
           </select>
+        </div>
+        <div class="field" style="flex:0 0 130px;">
+          <label>Código <span style="color:var(--out);">*</span></label>
+          <input type="password" id="salida-bulk-codigo-operador" placeholder="••••" autocomplete="off" inputmode="numeric"/>
         </div>
       </div>
       <div style="margin-top:14px;">
@@ -1185,6 +1232,9 @@ function renderTraslados(){
     .filter(m => m.tipo === 'traslado')
     .sort((a,b) => new Date(b.registradoEn) - new Date(a.registradoEn))
     .slice(0, 30);
+  const items = state.catalogo;
+  const selectedItemBulk = items.find(i=>i.id===t.bulk.itemId);
+  const variantesBulk = selectedItemBulk ? selectedItemBulk.variantes : [];
 
   return `
   <div class="panel">
@@ -1251,6 +1301,10 @@ function renderTraslados(){
               ${OPERADORES.map(o=>`<option value="${o}" ${t.operador===o?'selected':''}>${o}</option>`).join('')}
             </select>
           </div>
+          <div class="field" style="flex:0 0 130px;">
+            <label>Código <span style="color:var(--out);">*</span></label>
+            <input type="password" id="traslado-codigo-operador" placeholder="••••" autocomplete="off" inputmode="numeric"/>
+          </div>
         </div>
         <div class="field" style="margin-top:12px;max-width:420px;">
           <label>Notas del traslado (opcional)</label>
@@ -1261,6 +1315,66 @@ function renderTraslados(){
           <button class="btn btn-ghost" id="traslado-vaciar">Vaciar lista</button>
         </div>
       ` : `<div style="color:var(--text-faint);font-size:12.5px;">Busca un número de serie arriba para agregarlo a la lista.</div>`}
+    </div>
+  </div>
+
+  <div class="divider-label">traslado sin número de serie (ej. accesorios a granel)</div>
+
+  <div class="panel">
+    <div class="panel-body">
+      <div class="row-flex">
+        <div class="field">
+          <label>Ítem</label>
+          <select id="traslado-bulk-item">
+            <option value="">Seleccionar…</option>
+            ${items.map(i=>`<option value="${i.id}" ${t.bulk.itemId===i.id?'selected':''}>${i.nombre} (${i.tipo})</option>`).join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label>Variante</label>
+          <select id="traslado-bulk-variante" ${!selectedItemBulk?'disabled':''}>
+            <option value="">Seleccionar…</option>
+            ${variantesBulk.map(v=>`<option value="${v.id}" ${t.bulk.varianteId===v.id?'selected':''}>${v.sku} — ${v.descripcion} (stock: ${calcStock(v.id, t.bulk.bodegaOrigen)} en ${t.bulk.bodegaOrigen})</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="row-flex" style="margin-top:14px;">
+        <div class="field" style="flex:0 0 180px;">
+          <label>Bodega origen</label>
+          <select id="traslado-bulk-origen">
+            ${BODEGAS.map(b=>`<option value="${b}" ${t.bulk.bodegaOrigen===b?'selected':''}>${b}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field" style="flex:0 0 180px;">
+          <label>Bodega destino</label>
+          <input type="text" value="${t.bodegaDestino}" disabled style="opacity:.7;"/>
+        </div>
+        <div class="field" style="flex:0 0 120px;">
+          <label>Cantidad</label>
+          <input type="number" min="1" id="traslado-bulk-cant" value="${t.bulk.cantidad}"/>
+        </div>
+      </div>
+      <div class="row-flex" style="margin-top:14px;">
+        <div class="field">
+          <label>Operador <span style="color:var(--out);">*</span></label>
+          <select id="traslado-bulk-operador">
+            <option value="">Seleccionar…</option>
+            ${OPERADORES.map(o=>`<option value="${o}" ${t.bulk.operador===o?'selected':''}>${o}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field" style="flex:0 0 130px;">
+          <label>Código <span style="color:var(--out);">*</span></label>
+          <input type="password" id="traslado-bulk-codigo-operador" placeholder="••••" autocomplete="off" inputmode="numeric"/>
+        </div>
+        <div class="field">
+          <label>Notas (opcional)</label>
+          <input type="text" id="traslado-bulk-notas" value="${t.bulk.notas||''}" placeholder="Ej: reposición de stock…"/>
+        </div>
+      </div>
+      <div style="margin-top:14px;font-size:11.5px;color:var(--text-faint);">La bodega destino usada será la misma seleccionada arriba: <b style="color:var(--warn)">${t.bodegaDestino}</b>.</div>
+      <div style="margin-top:10px;">
+        <button class="btn btn-primary" id="traslado-bulk-submit">Registrar traslado</button>
+      </div>
     </div>
   </div>
 
@@ -1330,28 +1444,44 @@ function renderStock(){
   </div>
 
   <div class="panel">
-    <div class="panel-head"><div class="panel-title">Buscar por número de serie</div></div>
+    <div class="panel-head"><div class="panel-title">Buscar por número de serie o código de producto</div></div>
     <div class="panel-body">
-      <input class="field" id="serie-search" placeholder="Escanee o escriba un número de serie…"
-        style="background:var(--surface-2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:10px 12px;font-size:14px;font-family:var(--mono);width:100%;max-width:360px;" value="${state.filtro.serieStock||''}"/>
+      <input class="field" id="serie-search" placeholder="Escanee/escriba un número de serie, o escriba un código de producto…"
+        style="background:var(--surface-2);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:10px 12px;font-size:14px;font-family:var(--mono);width:100%;max-width:420px;" value="${state.filtro.serieStock||''}"/>
+      <div style="font-size:11.5px;color:var(--text-faint);margin-top:6px;">Para productos sin número de serie, busca directamente por su código.</div>
       <div id="serie-results" style="margin-top:14px;">${renderSerieResults(state.filtro.serieStock||'')}</div>
     </div>
   </div>`;
 }
 function renderSerieResults(q){
-  if(!q || !q.trim()) return `<div style="color:var(--text-faint);font-size:12.5px;">Escribe o escanea un número de serie para ver en qué movimiento e ítem aparece.</div>`;
-  const resultados = buscarPorSerie(q);
-  if(resultados.length===0) return `<div style="color:var(--text-faint);font-size:12.5px;">No se encontró ese número de serie en ningún movimiento.</div>`;
+  if(!q || !q.trim()) return `<div style="color:var(--text-faint);font-size:12.5px;">Escribe o escanea un número de serie, o escribe un código de producto, para ver en qué movimientos aparece.</div>`;
+  const qLower = q.trim().toLowerCase();
+  const porSerie = buscarPorSerie(q);
+  const porCodigo = state.movimientos.filter(m=>{
+    const v = findVariante(m.varianteId);
+    return v && v.sku.toLowerCase().includes(qLower);
+  });
+  const vistos = new Set();
+  const resultados = [...porSerie, ...porCodigo].filter(m=>{
+    if(vistos.has(m.id)) return false;
+    vistos.add(m.id);
+    return true;
+  }).sort((a,b)=> new Date(b.registradoEn) - new Date(a.registradoEn));
+  if(resultados.length===0) return `<div style="color:var(--text-faint);font-size:12.5px;">No se encontró ningún movimiento con esa serie o código.</div>`;
   return `<table>
-    <thead><tr><th>Fecha</th><th>Ítem / Variante</th><th>Tipo</th><th>Bodega</th><th>N° Serie</th><th>Usuario</th></tr></thead>
+    <thead><tr><th>Fecha</th><th>Ítem / Variante</th><th>Tipo</th><th>Cant.</th><th>Bodega</th><th>N° Serie</th><th>Usuario</th></tr></thead>
     <tbody>${resultados.map(m=>{
       const v = findVariante(m.varianteId);
+      const bodegaTxt = m.tipo==='traslado'
+        ? `${(m.bodegaOrigen||'').replace('Bodega ','')} → ${(m.bodegaDestino||'').replace('Bodega ','')}`
+        : (m.bodega||'—');
       return `<tr>
         <td class="mono">${m.fecha}</td>
         <td>${v?`${v.itemNombre}<br/><span class="mono" style="color:var(--text-faint);font-size:11.5px;">${v.sku}</span>`:'—'}</td>
-        <td><span class="tag ${m.tipo}">${m.tipo==='ingreso'?'↓ ingreso':'↑ salida'}</span></td>
-        <td>${m.bodega||'—'}</td>
-        <td class="mono" style="color:var(--warn)">${(m.numerosSerie||[]).join(', ')}</td>
+        <td><span class="tag ${m.tipo}">${tipoLabel(m.tipo)}</span></td>
+        <td class="mono">${m.cantidad}</td>
+        <td style="font-size:12px;">${bodegaTxt}</td>
+        <td class="mono" style="color:var(--warn)">${(m.numerosSerie||[]).length ? (m.numerosSerie||[]).join(', ') : '—'}</td>
         <td>${m.usuario}</td>
       </tr>`;
     }).join('')}</tbody>
@@ -1367,7 +1497,15 @@ function filtrarMovimientos(){
   if(f.desde) lista = lista.filter(m=>m.fecha >= f.desde);
   if(f.hasta) lista = lista.filter(m=>m.fecha <= f.hasta);
   if(f.bodega) lista = lista.filter(m=> m.bodega===f.bodega || m.bodegaOrigen===f.bodega || m.bodegaDestino===f.bodega);
-  if(f.serie) lista = lista.filter(m=>(m.numerosSerie||[]).some(s=>s.toLowerCase().includes(f.serie.toLowerCase())));
+  if(f.serie){
+    const q = f.serie.toLowerCase();
+    lista = lista.filter(m=>{
+      const bySerial = (m.numerosSerie||[]).some(s=>s.toLowerCase().includes(q));
+      const v = findVariante(m.varianteId);
+      const byCodigo = v && v.sku.toLowerCase().includes(q);
+      return bySerial || byCodigo;
+    });
+  }
   return lista;
 }
 function renderMovimientos(){
@@ -1405,7 +1543,7 @@ function renderMovimientos(){
       </div>
       <div class="field"><label>Desde</label><input type="date" id="filtro-desde" value="${f.desde||''}"/></div>
       <div class="field"><label>Hasta</label><input type="date" id="filtro-hasta" value="${f.hasta||''}"/></div>
-      <div class="field"><label>N° de serie</label><input type="text" id="filtro-serie" placeholder="Buscar serie…" value="${f.serie||''}"/></div>
+      <div class="field"><label>N° de serie o código de producto</label><input type="text" id="filtro-serie" placeholder="Buscar serie o código…" value="${f.serie||''}"/></div>
       <button class="btn btn-ghost" id="filtro-limpiar">Limpiar filtros</button>
     </div>
   </div>
@@ -1436,7 +1574,7 @@ function renderMovimientos(){
             <td><span class="tag ${m.origen}">${m.origen==='scanner'?'pistola':'manual'}</span></td>
             <td>${m.usuario}</td>
             <td style="font-size:12px;color:var(--text-dim);">${m.operador||'—'}</td>
-            <td style="color:var(--text-dim);max-width:140px;">${m.notas||''} ${m.editado?'<span class="tag edited">editado</span>':''}</td>
+            <td style="color:var(--text-dim);max-width:160px;">${m.tipo==='salida' && m.factura ? `<span style="color:var(--warn);font-weight:600;">Factura: ${m.factura}</span>${m.notas?' — '+m.notas:''}` : (m.notas||'')} ${m.editado?'<span class="tag edited">editado</span>':''}</td>
             <td>${canEdit ? `<button class="link-btn" data-edit-mov="${m.id}">Editar</button>` : ''}</td>
           </tr>`;
         }).join('')}</tbody>
@@ -1778,9 +1916,13 @@ function bindMovForm(tipo){
       const ivaEl = document.getElementById(`scan-${tipo}-iva`);
       const proveedorEl = document.getElementById(`scan-${tipo}-proveedor`);
       const operadorEl = document.getElementById(`scan-${tipo}-operador`);
+      const codigoOperadorEl = document.getElementById(`scan-${tipo}-codigo-operador`);
       const iva = ivaEl ? ivaEl.value : 'no';
       const operador = operadorEl ? operadorEl.value : '';
       if(!operador){ showToast('Debes seleccionar el Operador que realiza este ingreso.', true); return; }
+      if(!validarCodigoOperador(operador, codigoOperadorEl ? codigoOperadorEl.value : '')){
+        showToast('Código de operador incorrecto o vacío.', true); return;
+      }
       const series = parseSeries(seriesEl ? seriesEl.value : '');
       if(series.length===0 && !(sinSerieEl && sinSerieEl.checked)){
         showToast('El número de serie es obligatorio. Marca "Equipo sin seriado" si este producto no tiene serie.', true);
@@ -1838,11 +1980,15 @@ function bindMovForm(tipo){
     const ivaEl = document.getElementById(`manual-${tipo}-iva`);
     const proveedorEl = document.getElementById(`manual-${tipo}-proveedor`);
     const operadorEl = document.getElementById(`manual-${tipo}-operador`);
+    const codigoOperadorEl = document.getElementById(`manual-${tipo}-codigo-operador`);
     const iva = ivaEl ? ivaEl.value : 'no';
     const operador = operadorEl ? operadorEl.value : '';
     if(!codigo || !match){ showToast('Escribe un código de producto válido (debe existir en "Producto").', true); return; }
     if(cantidad <= 0){ showToast('La cantidad debe ser mayor a 0.', true); return; }
     if(!operador){ showToast('Debes seleccionar el Operador que realiza este ingreso.', true); return; }
+    if(!validarCodigoOperador(operador, codigoOperadorEl ? codigoOperadorEl.value : '')){
+      showToast('Código de operador incorrecto o vacío.', true); return;
+    }
     if(series.length===0 && !(sinSerieEl && sinSerieEl.checked)){
       showToast('El número de serie es obligatorio. Marca "Equipo sin seriado" si este producto no tiene serie.', true);
       return;
@@ -1927,10 +2073,14 @@ function bindSalida(){
     const precioEl = document.getElementById('salida-precioventa');
     const facturaEl = document.getElementById('salida-factura');
     const operadorEl = document.getElementById('salida-operador');
+    const codigoOperadorEl = document.getElementById('salida-codigo-operador');
     const factura = facturaEl ? facturaEl.value.trim() : '';
     const operador = operadorEl ? operadorEl.value : '';
     if(!factura){ showToast('Debes indicar la Factura/Comprobante de esta salida.', true); return; }
     if(!operador){ showToast('Debes seleccionar el Operador que realiza esta salida.', true); return; }
+    if(!validarCodigoOperador(operador, codigoOperadorEl ? codigoOperadorEl.value : '')){
+      showToast('Código de operador incorrecto o vacío.', true); return;
+    }
     const precio = Number(precioEl.value) || 0;
     const precioVentaTotalGlobal = precio ? (modoEl.value==='total' ? precio : precio * s.cola.length) : 0;
     const precioUnitarioPromedio = precio ? precioVentaTotalGlobal / s.cola.length : 0;
@@ -1974,26 +2124,66 @@ function bindSalida(){
   if(bulkFacturaEl) bulkFacturaEl.oninput = () => { s.bulk.factura = bulkFacturaEl.value; };
   const bulkOperadorEl = document.getElementById('salida-bulk-operador');
   if(bulkOperadorEl) bulkOperadorEl.onchange = () => { s.bulk.operador = bulkOperadorEl.value; };
+
+  const actualizarGananciaBulkPreview = () => {
+    const previewEl = document.getElementById('salida-bulk-ganancia-preview');
+    if(!previewEl) return;
+    const modoEl = document.getElementById('salida-bulk-modoventa');
+    const precioEl = document.getElementById('salida-bulk-precioventa');
+    const cantEl = document.getElementById('salida-bulk-cant');
+    if(!modoEl || !precioEl || !cantEl){ previewEl.innerHTML=''; return; }
+    const precio = Number(precioEl.value) || 0;
+    const cantidad = Number(cantEl.value) || 0;
+    if(!precio || !cantidad || !s.bulk.varianteId){ previewEl.innerHTML=''; return; }
+    const precioVentaTotal = modoEl.value==='total' ? precio : precio * cantidad;
+    const costoProm = costoPromedioVariante(s.bulk.varianteId);
+    if(costoProm == null){
+      previewEl.innerHTML = `Venta: <b>${formatoMoneda(precioVentaTotal)}</b> · Costo: <b>desconocido</b> (sin ingresos con valor registrado para este producto)`;
+      return;
+    }
+    const costoTotal = costoProm * cantidad;
+    const ganancia = precioVentaTotal - costoTotal;
+    previewEl.innerHTML = `Venta: <b>${formatoMoneda(precioVentaTotal)}</b> · Costo estimado: <b>${formatoMoneda(costoTotal)}</b> · Ganancia estimada: <b style="color:${ganancia>=0?'var(--in)':'var(--out)'}">${formatoMoneda(ganancia)}</b>`;
+  };
+  const bulkModoVentaEl = document.getElementById('salida-bulk-modoventa');
+  const bulkPrecioVentaEl = document.getElementById('salida-bulk-precioventa');
+  if(bulkModoVentaEl) bulkModoVentaEl.addEventListener('change', () => { s.bulk.modoVenta = bulkModoVentaEl.value; actualizarGananciaBulkPreview(); });
+  if(bulkPrecioVentaEl) bulkPrecioVentaEl.addEventListener('input', () => { s.bulk.precioVenta = bulkPrecioVentaEl.value; actualizarGananciaBulkPreview(); });
+  const bulkCantEl = document.getElementById('salida-bulk-cant');
+  if(bulkCantEl) bulkCantEl.addEventListener('input', actualizarGananciaBulkPreview);
+  actualizarGananciaBulkPreview();
+
   const bulkSubmit = document.getElementById('salida-bulk-submit');
   if(bulkSubmit) bulkSubmit.onclick = async () => {
     const varianteId = document.getElementById('salida-bulk-variante').value;
     const cantidad = Number(document.getElementById('salida-bulk-cant').value) || 0;
     const factura = document.getElementById('salida-bulk-factura').value.trim();
     const operador = document.getElementById('salida-bulk-operador').value;
+    const codigoOperadorEl = document.getElementById('salida-bulk-codigo-operador');
+    const modoEl = document.getElementById('salida-bulk-modoventa');
+    const precioEl = document.getElementById('salida-bulk-precioventa');
     if(!varianteId){ showToast('Selecciona un ítem y una variante.', true); return; }
     if(cantidad <= 0){ showToast('La cantidad debe ser mayor a 0.', true); return; }
     if(!factura){ showToast('Debes indicar la Factura/Comprobante de esta salida.', true); return; }
     if(!operador){ showToast('Debes seleccionar el Operador que realiza esta salida.', true); return; }
+    if(!validarCodigoOperador(operador, codigoOperadorEl ? codigoOperadorEl.value : '')){
+      showToast('Código de operador incorrecto o vacío.', true); return;
+    }
     const stockEnBodega = calcStock(varianteId, s.bodega);
     if(cantidad > stockEnBodega){
       showToast(`Solo hay ${stockEnBodega} unidad(es) de esa variante en ${s.bodega}.`, true); return;
     }
+    const precio = Number(precioEl.value) || 0;
+    const precioVentaTotal = precio ? (modoEl.value==='total' ? precio : precio * cantidad) : null;
+    const costoProm = costoPromedioVariante(varianteId);
+    const costoTotal = (precio && costoProm != null) ? costoProm * cantidad : null;
+    const ganancia = (precioVentaTotal != null && costoTotal != null) ? precioVentaTotal - costoTotal : null;
     await registrarMovimiento({
       varianteId, tipo: 'salida', cantidad, fecha: todayStr(), origen: 'manual',
-      bodega: s.bodega, numerosSerie: [], notas: '', valorUnitario: null, valorTotal: null,
-      factura, operador,
+      bodega: s.bodega, numerosSerie: [], notas: '', valorUnitario: null, valorTotal: costoTotal,
+      factura, operador, precioVentaTotal, ganancia,
     });
-    s.bulk = { itemId: '', varianteId: '', cantidad: 1, factura: '', operador: '' };
+    s.bulk = { itemId: '', varianteId: '', cantidad: 1, factura: '', operador: '', modoVenta: 'unitario', precioVenta: '' };
     showToast('Salida registrada correctamente.');
     render();
   };
@@ -2043,8 +2233,12 @@ function bindTraslados(){
   const confirmarBtn = document.getElementById('traslado-confirmar');
   if(confirmarBtn) confirmarBtn.onclick = async () => {
     const operadorSel = document.getElementById('traslado-operador');
+    const codigoOperadorEl = document.getElementById('traslado-codigo-operador');
     const operador = operadorSel ? operadorSel.value : '';
     if(!operador){ showToast('Debes seleccionar el Operador que realiza este traslado.', true); return; }
+    if(!validarCodigoOperador(operador, codigoOperadorEl ? codigoOperadorEl.value : '')){
+      showToast('Código de operador incorrecto o vacío.', true); return;
+    }
     const grupos = {};
     for(const c of t.cola){
       const key = c.varianteId + '|' + c.bodegaOrigen;
@@ -2061,6 +2255,47 @@ function bindTraslados(){
     }
     showToast(`Traslado registrado: ${t.cola.length} equipo(s) a ${t.bodegaDestino}.`);
     t.cola = []; t.notas = ''; t.operador = '';
+    render();
+  };
+
+  const bulkItemSel = document.getElementById('traslado-bulk-item');
+  if(bulkItemSel) bulkItemSel.onchange = () => { t.bulk.itemId = bulkItemSel.value; t.bulk.varianteId = ''; render(); };
+  const bulkVarSel = document.getElementById('traslado-bulk-variante');
+  if(bulkVarSel) bulkVarSel.onchange = () => { t.bulk.varianteId = bulkVarSel.value; };
+  const bulkOrigenSel = document.getElementById('traslado-bulk-origen');
+  if(bulkOrigenSel) bulkOrigenSel.onchange = () => { t.bulk.bodegaOrigen = bulkOrigenSel.value; render(); };
+  const bulkCantEl = document.getElementById('traslado-bulk-cant');
+  if(bulkCantEl) bulkCantEl.oninput = () => { t.bulk.cantidad = bulkCantEl.value; };
+  const bulkOperadorEl = document.getElementById('traslado-bulk-operador');
+  if(bulkOperadorEl) bulkOperadorEl.onchange = () => { t.bulk.operador = bulkOperadorEl.value; };
+  const bulkNotasEl = document.getElementById('traslado-bulk-notas');
+  if(bulkNotasEl) bulkNotasEl.oninput = () => { t.bulk.notas = bulkNotasEl.value; };
+
+  const bulkSubmit = document.getElementById('traslado-bulk-submit');
+  if(bulkSubmit) bulkSubmit.onclick = async () => {
+    const varianteId = document.getElementById('traslado-bulk-variante').value;
+    const bodegaOrigen = document.getElementById('traslado-bulk-origen').value;
+    const cantidad = Number(document.getElementById('traslado-bulk-cant').value) || 0;
+    const operador = document.getElementById('traslado-bulk-operador').value;
+    const codigoOperadorEl = document.getElementById('traslado-bulk-codigo-operador');
+    const notas = document.getElementById('traslado-bulk-notas').value;
+    if(!varianteId){ showToast('Selecciona un ítem y una variante.', true); return; }
+    if(bodegaOrigen === t.bodegaDestino){ showToast('La bodega origen y destino no pueden ser la misma.', true); return; }
+    if(cantidad <= 0){ showToast('La cantidad debe ser mayor a 0.', true); return; }
+    if(!operador){ showToast('Debes seleccionar el Operador que realiza este traslado.', true); return; }
+    if(!validarCodigoOperador(operador, codigoOperadorEl ? codigoOperadorEl.value : '')){
+      showToast('Código de operador incorrecto o vacío.', true); return;
+    }
+    const stockEnOrigen = calcStock(varianteId, bodegaOrigen);
+    if(cantidad > stockEnOrigen){
+      showToast(`Solo hay ${stockEnOrigen} unidad(es) de esa variante en ${bodegaOrigen}.`, true); return;
+    }
+    await registrarMovimiento({
+      varianteId, tipo: 'traslado', cantidad, fecha: todayStr(), origen: 'manual',
+      bodegaOrigen, bodegaDestino: t.bodegaDestino, numerosSerie: [], notas, operador,
+    });
+    t.bulk = { itemId: '', varianteId: '', bodegaOrigen: BODEGAS[0], cantidad: 1, operador: '', notas: '' };
+    showToast('Traslado registrado correctamente.');
     render();
   };
 }
@@ -2281,4 +2516,3 @@ loadAll();
 </script>
 </body>
 </html>
-
