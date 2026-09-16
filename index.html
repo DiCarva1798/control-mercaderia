@@ -182,6 +182,7 @@
   .tag.in, .tag.ingreso{background:var(--in-dim);color:var(--in);}
   .tag.out, .tag.salida{background:var(--out-dim);color:var(--out);}
   .tag.traslado{background:#2a2410;color:var(--warn);}
+  .tag.baja{background:#3a1414;color:#f87171;}
   .tag.scanner{background:#1e2c3d;color:var(--brand);}
   .tag.manual{background:var(--surface-3);color:var(--text-dim);}
   .tag.edited{background:#3a2f0c;color:var(--warn);}
@@ -372,10 +373,15 @@ let state = {
   salida: { bodega: BODEGAS[0], busqueda: '', cola: [], notas: '', modoVenta: 'unitario', precioVenta: '',
             factura: '', operador: '',
             bulk: { itemId: '', varianteId: '', cantidad: 1, factura: '', operador: '', modoVenta: 'unitario', precioVenta: '' } },
+  // baja de inventario (con o sin serie)
+  baja: { bodega: BODEGAS[0], busqueda: '', cola: [], notas: '', motivo: '', operador: '',
+          bulk: { itemId: '', varianteId: '', cantidad: 1, motivo: '', operador: '', notas: '' } },
   // filtros movimientos
   filtro: { itemId: '', tipo: '', desde: '', hasta: '', texto: '', bodega: '', serie: '' },
   editingMov: null,
   editForm: null,
+  editingVariante: null,
+  editVarianteForm: null,
   // catálogo UI
   categorias: [],
   newItem: { tipo: '', nombre: '', marca: '' },
@@ -399,6 +405,34 @@ function uid(prefix){
 function parseSeries(text){
   if(!text) return [];
   return text.split(/[\n,]+/).map(s=>s.trim()).filter(Boolean);
+}
+
+/* Un número de serie NUNCA debe registrarse dos veces en un ingreso,
+   sin importar si el primer registro ya salió, se trasladó o se dio
+   de baja (revisamos todo el historial, no solo el stock actual). */
+function serialYaRegistrado(serial, excluirMovId){
+  const q = serial.trim().toLowerCase();
+  if(!q) return null;
+  for(const m of state.movimientos){
+    if(m.tipo !== 'ingreso') continue;
+    if(excluirMovId && m.id === excluirMovId) continue;
+    if((m.numerosSerie||[]).some(s => s.toLowerCase() === q)) return m;
+  }
+  return null;
+}
+/* Revisa una lista de series a ingresar y devuelve las que ya existen. */
+function serialesDuplicados(seriesNuevas, excluirMovId){
+  const vistos = new Set();
+  const duplicados = [];
+  for(const s of seriesNuevas){
+    const key = s.trim().toLowerCase();
+    if(!key) continue;
+    if(vistos.has(key) || serialYaRegistrado(s, excluirMovId)){
+      duplicados.push(s);
+    }
+    vistos.add(key);
+  }
+  return duplicados;
 }
 
 /* ---------------- storage helpers (Supabase) ---------------- */
@@ -500,7 +534,7 @@ function calcStock(varianteId, bodega){
     if(m.varianteId !== varianteId) continue;
     if(m.tipo === 'ingreso'){
       if(!bodega || m.bodega === bodega) stock += m.cantidad;
-    } else if(m.tipo === 'salida'){
+    } else if(m.tipo === 'salida' || m.tipo === 'baja'){
       if(!bodega || m.bodega === bodega) stock -= m.cantidad;
     } else if(m.tipo === 'traslado'){
       if(bodega){
@@ -542,6 +576,10 @@ function serialesEstado(){
       } else if(m.tipo === 'salida'){
         const prev = estado[key];
         estado[key] = { serial: s, varianteId: m.varianteId, bodega: null, estado: 'salido',
+          valorUnitario: prev ? prev.valorUnitario : null, fechaIngreso: prev ? prev.fechaIngreso : null };
+      } else if(m.tipo === 'baja'){
+        const prev = estado[key];
+        estado[key] = { serial: s, varianteId: m.varianteId, bodega: null, estado: 'baja',
           valorUnitario: prev ? prev.valorUnitario : null, fechaIngreso: prev ? prev.fechaIngreso : null };
       } else if(m.tipo === 'traslado'){
         const prev = estado[key];
@@ -600,6 +638,7 @@ function valorTotalEnStock(){
   for(const m of state.movimientos){
     if(m.tipo === 'ingreso' && m.valorTotal != null) total += valorSinIvaDeIngreso(m);
     if(m.tipo === 'salida' && m.valorTotal) total -= Number(m.valorTotal);
+    if(m.tipo === 'baja' && m.valorTotal) total -= Number(m.valorTotal);
   }
   return total;
 }
@@ -688,7 +727,7 @@ async function registrarMovimiento(m){
     mov.proveedor = m.proveedor || '';
     mov.iva = m.iva || 'no';
   }
-  if(m.tipo === 'ingreso' || m.tipo === 'salida'){
+  if(m.tipo === 'ingreso' || m.tipo === 'salida' || m.tipo === 'baja'){
     mov.valorUnitario = (m.valorUnitario!=null && m.valorUnitario!=='') ? Number(m.valorUnitario) : null;
     mov.valorTotal = (m.valorTotal!=null && m.valorTotal!=='') ? Number(m.valorTotal) : null;
   }
@@ -696,6 +735,9 @@ async function registrarMovimiento(m){
     mov.precioVentaTotal = (m.precioVentaTotal!=null && m.precioVentaTotal!=='') ? Number(m.precioVentaTotal) : null;
     mov.ganancia = (m.ganancia!=null && m.ganancia!=='') ? Number(m.ganancia) : null;
     mov.factura = m.factura || '';
+  }
+  if(m.tipo === 'baja'){
+    mov.motivo = m.motivo || '';
   }
   state.movimientos = [mov, ...state.movimientos];
   await storageSet(KEYS.movimientos, state.movimientos);
@@ -760,7 +802,7 @@ function renderLogin(){
           <input id="login-pass" type="password" placeholder="••••••••" autocomplete="current-password"/>
         </div>
         <button class="btn btn-primary" id="login-btn" style="justify-content:center;margin-top:4px;">Ingresar</button>
-        <p class="login-hint">Demo inicial: <b>admin / </b> (administrador) o <b>operador / operador</b>.</p>
+        <p class="login-hint">(administrador) o <b>operador / operador123</b>.
       </div>
     </div>
   </div>`;
@@ -794,12 +836,13 @@ const NAV_ITEMS = [
   { id:'ingreso', label:'Ingreso', icon:'↓', roles:['admin'] },
   { id:'salida', label:'Salida', icon:'↑', roles:['admin'] },
   { id:'traslados', label:'Traslados', icon:'⇄', roles:['admin'] },
+  { id:'baja', label:'Baja', icon:'⊘', roles:['admin'] },
   { id:'stock', label:'Stock', icon:'▣', roles:['admin','operador'] },
   { id:'movimientos', label:'Movimientos', icon:'≡', roles:['admin','operador'] },
   { id:'catalogo', label:'Producto', icon:'◧', roles:['admin'] },
   { id:'usuarios', label:'Usuarios', icon:'☺', roles:['admin'] },
 ];
-const ADMIN_ONLY_VIEWS = ['dashboard','ingreso','salida','traslados','catalogo','usuarios'];
+const ADMIN_ONLY_VIEWS = ['dashboard','ingreso','salida','traslados','baja','catalogo','usuarios'];
 
 function renderShell(){
   const u = state.currentUser;
@@ -812,7 +855,7 @@ function renderShell(){
 
   const titles = {
     dashboard:'Panel general', ingreso:'Ingreso de mercadería', salida:'Salida de mercadería',
-    traslados:'Traslado entre bodegas',
+    traslados:'Traslado entre bodegas', baja:'Baja de inventario',
     stock:'Consulta de stock', movimientos:'Historial de movimientos', catalogo:'Producto',
     usuarios:'Gestión de usuarios',
   };
@@ -849,6 +892,7 @@ function renderShell(){
   </div>
   ${state.toast ? `<div class="toast ${state.toast.isErr?'err':''}">${state.toast.msg}</div>` : ''}
   ${state.editingMov ? renderEditModal() : ''}
+  ${state.editingVariante ? renderEditVarianteModal() : ''}
   `;
 }
 
@@ -861,6 +905,7 @@ function renderView(){
     case 'ingreso': return renderMovForm('ingreso');
     case 'salida': return renderSalida();
     case 'traslados': return renderTraslados();
+    case 'baja': return renderBaja();
     case 'stock': return renderStock();
     case 'movimientos': return renderMovimientos();
     case 'catalogo': return renderCatalogo();
@@ -903,6 +948,7 @@ function renderDashboard(){
 function tipoLabel(tipo){
   if(tipo==='ingreso') return '↓ ingreso';
   if(tipo==='salida') return '↑ salida';
+  if(tipo==='baja') return '⊘ baja';
   return '⇄ traslado';
 }
 function rowMovimiento(m){
@@ -1224,6 +1270,161 @@ function renderSalida(){
   </div>`;
 }
 
+/* ================= BAJA DE INVENTARIO ================= */
+const MOTIVOS_BAJA = ['Dañado', 'Perdido', 'Robado', 'Obsoleto / descontinuado', 'Defecto de fábrica / garantía', 'Otro'];
+
+function renderBaja(){
+  const s = state.baja;
+  const items = state.catalogo;
+  const selectedItem = items.find(i=>i.id===s.bulk.itemId);
+  const variantesBulk = selectedItem ? selectedItem.variantes : [];
+  const resultados = buscarSerialesDisponibles(s.busqueda);
+
+  return `
+  <div class="panel">
+    <div class="panel-head"><div class="panel-title">Buscar equipo por número de serie</div></div>
+    <div class="panel-body">
+      <div class="field" style="max-width:280px;margin-bottom:14px;">
+        <label>Bodega donde se da de baja</label>
+        <select id="baja-bodega">
+          ${BODEGAS.map(b=>`<option value="${b}" ${s.bodega===b?'selected':''}>${b}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field">
+        <label>🔍 Buscar por número de serie</label>
+        <input class="scan-input" id="baja-busqueda" placeholder="Escribe parte del número de serie…" autocomplete="off" value="${s.busqueda||''}"/>
+      </div>
+      ${s.busqueda ? `
+        <div style="margin-top:12px;">
+          ${resultados.length===0 ? `<div class="empty-state" style="padding:16px;">No se encontró ningún equipo en stock con esa serie.</div>` : `
+          <table>
+            <thead><tr><th>Ítem</th><th>SKU</th><th>N° Serie</th><th>Bodega actual</th><th></th></tr></thead>
+            <tbody>
+              ${resultados.map(r => {
+                const yaEnCola = s.cola.some(c=>c.serial.toLowerCase()===r.serial.toLowerCase());
+                const mismaBodega = r.bodega === s.bodega;
+                return `<tr>
+                  <td>${r.itemNombre}</td>
+                  <td class="mono">${r.sku}</td>
+                  <td class="mono" style="color:var(--warn)">${r.serial}</td>
+                  <td><span class="tag ${bodegaTagClass(r.bodega)}">${r.bodega}</span></td>
+                  <td>
+                    ${yaEnCola ? `<span style="color:var(--text-faint);font-size:12px;">ya agregado</span>`
+                      : mismaBodega ? `<button class="link-btn" data-agregar-baja="${r.serial}">+ Agregar a baja</button>`
+                      : `<span style="color:var(--out);font-size:11.5px;">está en ${r.bodega} — cambia la bodega de arriba o haz un traslado primero</span>`}
+                  </td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>`}
+        </div>` : ''}
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head"><div class="panel-title">Equipos a dar de baja <span class="badge-count">${s.cola.length}</span></div></div>
+    <div class="panel-body">
+      ${s.cola.length===0 ? `<div style="color:var(--text-faint);font-size:12.5px;">Busca un número de serie arriba y agrégalo a la lista.</div>` : `
+        <table>
+          <thead><tr><th>Ítem</th><th>SKU</th><th>N° Serie</th><th></th></tr></thead>
+          <tbody>
+            ${s.cola.map((c,idx)=>`<tr>
+              <td>${c.itemNombre}</td>
+              <td class="mono">${c.sku}</td>
+              <td class="mono" style="color:var(--warn)">${c.serial}</td>
+              <td><button class="link-btn" data-quitar-baja="${idx}" style="color:var(--out)">Quitar</button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+        <div class="row-flex" style="margin-top:12px;max-width:520px;">
+          <div class="field">
+            <label>Motivo de la baja <span style="color:var(--out);">*</span></label>
+            <select id="baja-motivo">
+              <option value="">Seleccionar…</option>
+              ${MOTIVOS_BAJA.map(mo=>`<option value="${mo}" ${s.motivo===mo?'selected':''}>${mo}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div class="row-flex" style="margin-top:12px;max-width:520px;">
+          <div class="field">
+            <label>Operador <span style="color:var(--out);">*</span></label>
+            <select id="baja-operador">
+              <option value="">Seleccionar…</option>
+              ${OPERADORES.map(o=>`<option value="${o}" ${s.operador===o?'selected':''}>${o}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field" style="flex:0 0 130px;">
+            <label>Código <span style="color:var(--out);">*</span></label>
+            <input type="password" id="baja-codigo-operador" placeholder="••••" autocomplete="off" inputmode="numeric"/>
+          </div>
+        </div>
+        <div class="field" style="margin-top:12px;max-width:420px;">
+          <label>Notas (opcional)</label>
+          <input type="text" id="baja-notas" value="${s.notas||''}" placeholder="Detalles adicionales…"/>
+        </div>
+        <div style="margin-top:12px;">
+          <button class="btn btn-out" id="baja-confirmar">Confirmar baja de ${s.cola.length} equipo(s)</button>
+          <button class="btn btn-ghost" id="baja-vaciar">Vaciar lista</button>
+        </div>
+      `}
+    </div>
+  </div>
+
+  <div class="divider-label">baja sin número de serie (ej. accesorios a granel)</div>
+
+  <div class="panel">
+    <div class="panel-body">
+      <div class="row-flex">
+        <div class="field">
+          <label>Ítem</label>
+          <select id="baja-bulk-item">
+            <option value="">Seleccionar…</option>
+            ${items.map(i=>`<option value="${i.id}" ${s.bulk.itemId===i.id?'selected':''}>${i.nombre} (${i.tipo})</option>`).join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label>Variante</label>
+          <select id="baja-bulk-variante" ${!selectedItem?'disabled':''}>
+            <option value="">Seleccionar…</option>
+            ${variantesBulk.map(v=>`<option value="${v.id}" ${s.bulk.varianteId===v.id?'selected':''}>${v.sku} — ${v.descripcion} (stock: ${calcStock(v.id, s.bodega)} en ${s.bodega})</option>`).join('')}
+          </select>
+        </div>
+        <div class="field" style="flex:0 0 120px;">
+          <label>Cantidad</label>
+          <input type="number" min="1" id="baja-bulk-cant" value="${s.bulk.cantidad}"/>
+        </div>
+      </div>
+      <div class="row-flex" style="margin-top:14px;">
+        <div class="field">
+          <label>Motivo de la baja <span style="color:var(--out);">*</span></label>
+          <select id="baja-bulk-motivo">
+            <option value="">Seleccionar…</option>
+            ${MOTIVOS_BAJA.map(mo=>`<option value="${mo}" ${s.bulk.motivo===mo?'selected':''}>${mo}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label>Operador <span style="color:var(--out);">*</span></label>
+          <select id="baja-bulk-operador">
+            <option value="">Seleccionar…</option>
+            ${OPERADORES.map(o=>`<option value="${o}" ${s.bulk.operador===o?'selected':''}>${o}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field" style="flex:0 0 130px;">
+          <label>Código <span style="color:var(--out);">*</span></label>
+          <input type="password" id="baja-bulk-codigo-operador" placeholder="••••" autocomplete="off" inputmode="numeric"/>
+        </div>
+      </div>
+      <div class="field" style="margin-top:14px;max-width:420px;">
+        <label>Notas (opcional)</label>
+        <input type="text" id="baja-bulk-notas" value="${s.bulk.notas||''}" placeholder="Detalles adicionales…"/>
+      </div>
+      <div style="margin-top:14px;">
+        <button class="btn btn-out" id="baja-bulk-submit">Registrar baja</button>
+      </div>
+    </div>
+  </div>`;
+}
+
 /* ================= TRASLADOS ================= */
 function renderTraslados(){
   const t = state.traslado;
@@ -1532,6 +1733,7 @@ function renderMovimientos(){
           <option value="ingreso" ${f.tipo==='ingreso'?'selected':''}>Ingreso</option>
           <option value="salida" ${f.tipo==='salida'?'selected':''}>Salida</option>
           <option value="traslado" ${f.tipo==='traslado'?'selected':''}>Traslado</option>
+          <option value="baja" ${f.tipo==='baja'?'selected':''}>Baja</option>
         </select>
       </div>
       <div class="field">
@@ -1574,11 +1776,51 @@ function renderMovimientos(){
             <td><span class="tag ${m.origen}">${m.origen==='scanner'?'pistola':'manual'}</span></td>
             <td>${m.usuario}</td>
             <td style="font-size:12px;color:var(--text-dim);">${m.operador||'—'}</td>
-            <td style="color:var(--text-dim);max-width:160px;">${m.tipo==='salida' && m.factura ? `<span style="color:var(--warn);font-weight:600;">Factura: ${m.factura}</span>${m.notas?' — '+m.notas:''}` : (m.notas||'')} ${m.editado?'<span class="tag edited">editado</span>':''}</td>
+            <td style="color:var(--text-dim);max-width:160px;">${
+              m.tipo==='salida' && m.factura ? `<span style="color:var(--warn);font-weight:600;">Factura: ${m.factura}</span>${m.notas?' — '+m.notas:''}`
+              : m.tipo==='baja' && m.motivo ? `<span style="color:#f87171;font-weight:600;">Motivo: ${m.motivo}</span>${m.notas?' — '+m.notas:''}`
+              : (m.notas||'')
+            } ${m.editado?'<span class="tag edited">editado</span>':''}</td>
             <td>${canEdit ? `<button class="link-btn" data-edit-mov="${m.id}">Editar</button>` : ''}</td>
           </tr>`;
         }).join('')}</tbody>
       </table>`}
+    </div>
+  </div>`;
+}
+
+function renderEditVarianteModal(){
+  const { itemId, varianteId } = state.editingVariante;
+  const item = state.catalogo.find(it => it.id === itemId);
+  const v = item ? item.variantes.find(x => x.id === varianteId) : null;
+  const f = state.editVarianteForm;
+  if(!item || !v) return '';
+  return `
+  <div class="modal-overlay" id="modal-variante-overlay">
+    <div class="modal">
+      <div class="modal-head">
+        <div class="modal-title">Editar producto</div>
+        <button class="modal-close" id="modal-variante-close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div style="font-size:12.5px;color:var(--text-dim);">${item.nombre} — ${item.marca} · ${item.tipo}</div>
+        <div class="field"><label>Código / ID único</label><input type="text" id="ev-sku" value="${f.sku}"/></div>
+        <div class="field"><label>Descripción</label><input type="text" id="ev-desc" value="${f.descripcion}"/></div>
+        <div class="row-flex">
+          <div class="field"><label>Precio de Venta (PVP)</label><input type="number" min="0" step="0.01" id="ev-pvp" value="${f.precioVenta!=null?f.precioVenta:''}"/></div>
+          <div class="field" style="flex:0 0 150px;"><label>Graba IVA</label>
+            <select id="ev-iva">
+              <option value="no" ${f.gravaIva!=='si'?'selected':''}>No</option>
+              <option value="si" ${f.gravaIva==='si'?'selected':''}>Sí</option>
+            </select>
+          </div>
+        </div>
+        <div style="font-size:11.5px;color:var(--text-faint);">Stock actual: ${calcStock(v.id)} unidades. Cambiar estos datos no afecta el stock ni el historial de movimientos ya registrados.</div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" id="modal-variante-cancel">Cancelar</button>
+        <button class="btn btn-primary" id="modal-variante-save">Guardar cambios</button>
+      </div>
     </div>
   </div>`;
 }
@@ -1728,7 +1970,7 @@ function renderCatalogo(){
               <td class="mono">${v.precioVenta!=null ? formatoMoneda(v.precioVenta) : '—'}</td>
               <td><span class="tag ${v.gravaIva==='si'?'in':'manual'}">${v.gravaIva==='si'?'Sí':'No'}</span></td>
               <td class="mono" style="font-weight:700;">${calcStock(v.id)}</td>
-              <td>${isAdmin ? `<button class="link-btn" data-del-variante="${seleccionado.id}|${v.id}">Eliminar</button>` : ''}</td>
+              <td>${isAdmin ? `<button class="link-btn" data-edit-variante="${seleccionado.id}|${v.id}">Editar</button> · <button class="link-btn" data-del-variante="${seleccionado.id}|${v.id}" style="color:var(--out)">Eliminar</button>` : ''}</td>
             </tr>`).join('')}
             ${seleccionado.variantes.length===0 ? `<tr><td colspan="6" style="color:var(--text-faint);">Sin productos todavía en este grupo.</td></tr>` : ''}
           </tbody>
@@ -1796,28 +2038,46 @@ function renderUsuarios(){
 
 /* ================= EXPORTAR A EXCEL ================= */
 function descargarExcel(filas, nombreHoja, nombreArchivo){
+  descargarExcelMultiHoja([{ nombre: nombreHoja, filas }], nombreArchivo);
+}
+function descargarExcelMultiHoja(hojas, nombreArchivo){
   if(typeof XLSX === 'undefined'){
     showToast('No se pudo cargar el módulo de Excel. Verifica tu conexión a internet.', true);
     return;
   }
-  const ws = XLSX.utils.json_to_sheet(filas);
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, nombreHoja);
+  for(const hoja of hojas){
+    const ws = XLSX.utils.json_to_sheet(hoja.filas);
+    XLSX.utils.book_append_sheet(wb, ws, hoja.nombre);
+  }
   XLSX.writeFile(wb, nombreArchivo);
 }
 
 function exportarStockExcel(){
-  const filas = allVariantes().map(v => {
-    const s = calcStockPorBodega(v.id);
-    const fila = {
-      'Categoría': v.tipo, 'Ítem': v.itemNombre, 'Marca': v.marca,
-      'SKU': v.sku, 'Descripción variante': v.descripcion,
-    };
-    BODEGAS.forEach(b => { fila[b] = s[b]; });
-    fila['Total'] = s.total;
-    fila['Números de serie en stock'] = serialesEnStock(v.id).join(', ');
-    return fila;
-  });
+  // Una sola hoja: organizada por bodega, mostrando tanto las unidades con
+  // número de serie (una fila por cada una) como las que no tienen serie
+  // (una fila con la cantidad agrupada).
+  const filas = [];
+  for(const b of BODEGAS){
+    for(const v of allVariantes()){
+      const cantidadTotal = calcStock(v.id, b);
+      if(cantidadTotal <= 0) continue;
+      const seriales = serialesEnStock(v.id, b);
+      for(const serial of seriales){
+        filas.push({
+          'Bodega': b, 'Categoría': v.tipo, 'Ítem': v.itemNombre, 'Marca': v.marca,
+          'SKU': v.sku, 'Descripción': v.descripcion, 'N° de Serie': serial, 'Cantidad': 1,
+        });
+      }
+      const cantidadSinSerie = cantidadTotal - seriales.length;
+      if(cantidadSinSerie > 0){
+        filas.push({
+          'Bodega': b, 'Categoría': v.tipo, 'Ítem': v.itemNombre, 'Marca': v.marca,
+          'SKU': v.sku, 'Descripción': v.descripcion, 'N° de Serie': '(sin serie)', 'Cantidad': cantidadSinSerie,
+        });
+      }
+    }
+  }
   descargarExcel(filas, 'Stock', `stock_${todayStr()}.xlsx`);
 }
 
@@ -1828,12 +2088,13 @@ function exportarMovimientosExcel(lista){
     const bodegaTxt = m.tipo==='traslado' ? '' : (m.bodega || '');
     const fila = {
       'Fecha': m.fecha, 'Ítem': v ? v.itemNombre : '(variante eliminada)', 'SKU': v ? v.sku : '',
-      'Tipo': m.tipo === 'ingreso' ? 'Ingreso' : m.tipo === 'salida' ? 'Salida' : 'Traslado',
+      'Tipo': m.tipo === 'ingreso' ? 'Ingreso' : m.tipo === 'salida' ? 'Salida' : m.tipo === 'baja' ? 'Baja' : 'Traslado',
       'Cantidad': m.cantidad,
       'Bodega': bodegaTxt,
       'Bodega origen (traslado)': m.bodegaOrigen || '',
       'Bodega destino (traslado)': m.bodegaDestino || '',
       'Números de serie': (m.numerosSerie||[]).join(', '),
+      'Motivo de baja': m.motivo || '',
     };
     if(verDinero){
       fila['Proveedor'] = m.proveedor || '';
@@ -1844,6 +2105,7 @@ function exportarMovimientosExcel(lista){
       fila['Factura/Comprobante'] = m.factura || '';
       fila['Precio de Venta'] = m.precioVentaTotal!=null ? m.precioVentaTotal : '';
       fila['Ganancia'] = m.ganancia!=null ? m.ganancia : '';
+      fila['Valor de la baja'] = m.tipo==='baja' && m.valorTotal!=null ? m.valorTotal : '';
     }
     fila['Origen'] = m.origen === 'scanner' ? 'Pistola' : 'Manual';
     fila['Usuario'] = m.usuario;
@@ -1868,11 +2130,13 @@ function bindShell(){
   if(state.view === 'ingreso') bindMovForm('ingreso');
   if(state.view === 'salida') bindSalida();
   if(state.view === 'traslados') bindTraslados();
+  if(state.view === 'baja') bindBaja();
   if(state.view === 'stock') bindStock();
   if(state.view === 'movimientos') bindMovimientos();
   if(state.view === 'catalogo') bindCatalogo();
   if(state.view === 'usuarios') bindUsuarios();
   if(state.editingMov) bindEditModal();
+  if(state.editingVariante) bindEditVarianteModal();
 }
 
 function bindMovForm(tipo){
@@ -1926,6 +2190,11 @@ function bindMovForm(tipo){
       const series = parseSeries(seriesEl ? seriesEl.value : '');
       if(series.length===0 && !(sinSerieEl && sinSerieEl.checked)){
         showToast('El número de serie es obligatorio. Marca "Equipo sin seriado" si este producto no tiene serie.', true);
+        return;
+      }
+      const duplicados = serialesDuplicados(series);
+      if(duplicados.length > 0){
+        showToast(`El número de serie "${duplicados[0]}" ya fue ingresado antes. No se puede registrar dos veces.`, true);
         return;
       }
       const { valorUnitario, valorTotal } = calcularValores(modoValorEl.value, valorEl.value, cant, iva);
@@ -1991,6 +2260,11 @@ function bindMovForm(tipo){
     }
     if(series.length===0 && !(sinSerieEl && sinSerieEl.checked)){
       showToast('El número de serie es obligatorio. Marca "Equipo sin seriado" si este producto no tiene serie.', true);
+      return;
+    }
+    const duplicados = serialesDuplicados(series);
+    if(duplicados.length > 0){
+      showToast(`El número de serie "${duplicados[0]}" ya fue ingresado antes. No se puede registrar dos veces.`, true);
       return;
     }
     const { valorUnitario, valorTotal } = calcularValores(modoValorEl.value, valorEl.value, cantidad, iva);
@@ -2189,6 +2463,127 @@ function bindSalida(){
   };
 }
 
+function bindBaja(){
+  const s = state.baja;
+  const bodegaSel = document.getElementById('baja-bodega');
+  if(bodegaSel) bodegaSel.onchange = () => { s.bodega = bodegaSel.value; render(); };
+
+  const busquedaEl = document.getElementById('baja-busqueda');
+  if(busquedaEl){
+    busquedaEl.focus();
+    busquedaEl.setSelectionRange(busquedaEl.value.length, busquedaEl.value.length);
+    busquedaEl.oninput = () => { s.busqueda = busquedaEl.value; render(); };
+  }
+
+  document.querySelectorAll('[data-agregar-baja]').forEach(btn => {
+    btn.onclick = () => {
+      const serial = btn.getAttribute('data-agregar-baja');
+      const ubic = ubicarSerial(serial);
+      if(!ubic || ubic.estado !== 'en_stock'){ showToast('Ese equipo ya no está disponible en stock.', true); render(); return; }
+      if(ubic.bodega !== s.bodega){ showToast(`Ese equipo está en ${ubic.bodega}. Cambia la bodega arriba o haz un traslado primero.`, true); render(); return; }
+      if(s.cola.some(c=>c.serial.toLowerCase()===serial.toLowerCase())) return;
+      const v = findVariante(ubic.varianteId);
+      s.cola = [...s.cola, { serial, varianteId: ubic.varianteId, itemNombre: v?v.itemNombre:'—', sku: v?v.sku:'—' }];
+      render();
+    };
+  });
+
+  document.querySelectorAll('[data-quitar-baja]').forEach(btn => {
+    btn.onclick = () => {
+      const idx = Number(btn.getAttribute('data-quitar-baja'));
+      s.cola = s.cola.filter((_,i)=>i!==idx);
+      render();
+    };
+  });
+
+  const notasEl = document.getElementById('baja-notas');
+  if(notasEl) notasEl.oninput = () => { s.notas = notasEl.value; };
+  const motivoEl = document.getElementById('baja-motivo');
+  if(motivoEl) motivoEl.onchange = () => { s.motivo = motivoEl.value; };
+  const operadorEl = document.getElementById('baja-operador');
+  if(operadorEl) operadorEl.onchange = () => { s.operador = operadorEl.value; };
+
+  const vaciarBtn = document.getElementById('baja-vaciar');
+  if(vaciarBtn) vaciarBtn.onclick = () => { s.cola = []; s.notas = ''; s.motivo = ''; s.operador = ''; render(); };
+
+  const confirmarBtn = document.getElementById('baja-confirmar');
+  if(confirmarBtn) confirmarBtn.onclick = async () => {
+    const motivoSel = document.getElementById('baja-motivo');
+    const operadorSel = document.getElementById('baja-operador');
+    const codigoOperadorEl = document.getElementById('baja-codigo-operador');
+    const motivo = motivoSel ? motivoSel.value : '';
+    const operador = operadorSel ? operadorSel.value : '';
+    if(!motivo){ showToast('Debes indicar el Motivo de la baja.', true); return; }
+    if(!operador){ showToast('Debes seleccionar el Operador que realiza esta baja.', true); return; }
+    if(!validarCodigoOperador(operador, codigoOperadorEl ? codigoOperadorEl.value : '')){
+      showToast('Código de operador incorrecto o vacío.', true); return;
+    }
+    const grupos = {};
+    for(const c of s.cola){
+      if(!grupos[c.varianteId]) grupos[c.varianteId] = [];
+      grupos[c.varianteId].push(c.serial);
+    }
+    for(const varianteId in grupos){
+      const seriales = grupos[varianteId];
+      let costoTotal = 0, algunCosto = false;
+      for(const serial of seriales){
+        const ubic = ubicarSerial(serial);
+        if(ubic && ubic.valorUnitario != null){ costoTotal += Number(ubic.valorUnitario); algunCosto = true; }
+      }
+      await registrarMovimiento({
+        varianteId, tipo: 'baja', cantidad: seriales.length, fecha: todayStr(), origen: 'manual',
+        bodega: s.bodega, numerosSerie: seriales, notas: s.notas, motivo, operador,
+        valorUnitario: null, valorTotal: algunCosto ? costoTotal : null,
+      });
+    }
+    showToast(`Baja registrada: ${s.cola.length} equipo(s).`);
+    s.cola = []; s.notas = ''; s.busqueda = ''; s.motivo = ''; s.operador = '';
+    render();
+  };
+
+  const bulkItemSel = document.getElementById('baja-bulk-item');
+  if(bulkItemSel) bulkItemSel.onchange = () => { s.bulk.itemId = bulkItemSel.value; s.bulk.varianteId = ''; render(); };
+  const bulkVarSel = document.getElementById('baja-bulk-variante');
+  if(bulkVarSel) bulkVarSel.onchange = () => { s.bulk.varianteId = bulkVarSel.value; };
+  const bulkMotivoEl = document.getElementById('baja-bulk-motivo');
+  if(bulkMotivoEl) bulkMotivoEl.onchange = () => { s.bulk.motivo = bulkMotivoEl.value; };
+  const bulkOperadorEl = document.getElementById('baja-bulk-operador');
+  if(bulkOperadorEl) bulkOperadorEl.onchange = () => { s.bulk.operador = bulkOperadorEl.value; };
+  const bulkNotasEl = document.getElementById('baja-bulk-notas');
+  if(bulkNotasEl) bulkNotasEl.oninput = () => { s.bulk.notas = bulkNotasEl.value; };
+
+  const bulkSubmit = document.getElementById('baja-bulk-submit');
+  if(bulkSubmit) bulkSubmit.onclick = async () => {
+    const varianteId = document.getElementById('baja-bulk-variante').value;
+    const cantidad = Number(document.getElementById('baja-bulk-cant').value) || 0;
+    const motivo = document.getElementById('baja-bulk-motivo').value;
+    const operador = document.getElementById('baja-bulk-operador').value;
+    const codigoOperadorEl = document.getElementById('baja-bulk-codigo-operador');
+    const notas = document.getElementById('baja-bulk-notas').value;
+    if(!varianteId){ showToast('Selecciona un ítem y una variante.', true); return; }
+    if(cantidad <= 0){ showToast('La cantidad debe ser mayor a 0.', true); return; }
+    if(!motivo){ showToast('Debes indicar el Motivo de la baja.', true); return; }
+    if(!operador){ showToast('Debes seleccionar el Operador que realiza esta baja.', true); return; }
+    if(!validarCodigoOperador(operador, codigoOperadorEl ? codigoOperadorEl.value : '')){
+      showToast('Código de operador incorrecto o vacío.', true); return;
+    }
+    const stockEnBodega = calcStock(varianteId, s.bodega);
+    if(cantidad > stockEnBodega){
+      showToast(`Solo hay ${stockEnBodega} unidad(es) de esa variante en ${s.bodega}.`, true); return;
+    }
+    const costoProm = costoPromedioVariante(varianteId);
+    const costoTotal = costoProm != null ? costoProm * cantidad : null;
+    await registrarMovimiento({
+      varianteId, tipo: 'baja', cantidad, fecha: todayStr(), origen: 'manual',
+      bodega: s.bodega, numerosSerie: [], notas, motivo, operador,
+      valorUnitario: null, valorTotal: costoTotal,
+    });
+    s.bulk = { itemId: '', varianteId: '', cantidad: 1, motivo: '', operador: '', notas: '' };
+    showToast('Baja registrada correctamente.');
+    render();
+  };
+}
+
 function bindTraslados(){
   const t = state.traslado;
   const destinoSel = document.getElementById('traslado-destino');
@@ -2349,6 +2744,33 @@ function bindMovimientos(){
   });
 }
 
+function bindEditVarianteModal(){
+  const close = () => { state.editingVariante = null; state.editVarianteForm = null; render(); };
+  document.getElementById('modal-variante-close').onclick = close;
+  document.getElementById('modal-variante-cancel').onclick = close;
+  document.getElementById('modal-variante-overlay').addEventListener('click', e => { if(e.target.id === 'modal-variante-overlay') close(); });
+  document.getElementById('modal-variante-save').onclick = async () => {
+    const { itemId, varianteId } = state.editingVariante;
+    const nuevoSku = document.getElementById('ev-sku').value.trim();
+    const nuevaDesc = document.getElementById('ev-desc').value.trim();
+    const pvpEl = document.getElementById('ev-pvp');
+    const ivaEl = document.getElementById('ev-iva');
+    if(!nuevoSku || !nuevaDesc){ showToast('El código y la descripción no pueden quedar vacíos.', true); return; }
+    const otroConEseSku = allVariantes().find(v => v.id !== varianteId && v.sku.toLowerCase() === nuevoSku.toLowerCase());
+    if(otroConEseSku){ showToast('Ya existe otro producto con ese código.', true); return; }
+    const nuevoPrecio = pvpEl.value !== '' ? Number(pvpEl.value) : null;
+    const nuevoIva = ivaEl.value;
+    state.catalogo = state.catalogo.map(it => it.id !== itemId ? it : {
+      ...it,
+      variantes: it.variantes.map(v => v.id !== varianteId ? v : { ...v, sku: nuevoSku, descripcion: nuevaDesc, precioVenta: nuevoPrecio, gravaIva: nuevoIva }),
+    });
+    await storageSet(KEYS.catalogo, state.catalogo);
+    showToast('Producto actualizado.');
+    state.editingVariante = null; state.editVarianteForm = null;
+    render();
+  };
+}
+
 function bindEditModal(){
   const close = () => { state.editingMov = null; state.editForm = null; render(); };
   document.getElementById('modal-close').onclick = close;
@@ -2366,6 +2788,14 @@ function bindEditModal(){
     const nuevasNotas = document.getElementById('edit-notas').value;
     const nuevasSeries = parseSeries(document.getElementById('edit-series').value);
     const motivo = document.getElementById('edit-motivo').value;
+
+    if(m.tipo === 'ingreso'){
+      const duplicados = serialesDuplicados(nuevasSeries, m.id);
+      if(duplicados.length > 0){
+        showToast(`El número de serie "${duplicados[0]}" ya está registrado en otro movimiento.`, true);
+        return;
+      }
+    }
 
     m.cantidad = nuevaCant; m.fecha = nuevaFecha; m.notas = nuevasNotas; m.numerosSerie = nuevasSeries;
 
@@ -2461,6 +2891,17 @@ function bindCatalogo(){
     };
   });
 
+  document.querySelectorAll('[data-edit-variante]').forEach(btn => {
+    btn.onclick = () => {
+      const [itemId, varianteId] = btn.getAttribute('data-edit-variante').split('|');
+      const item = state.catalogo.find(it => it.id === itemId);
+      const v = item ? item.variantes.find(x => x.id === varianteId) : null;
+      if(!v) return;
+      state.editingVariante = { itemId, varianteId };
+      state.editVarianteForm = { sku: v.sku, descripcion: v.descripcion, precioVenta: v.precioVenta, gravaIva: v.gravaIva };
+      render();
+    };
+  });
   document.querySelectorAll('[data-del-variante]').forEach(btn => {
     btn.onclick = async () => {
       const [itemId, varianteId] = btn.getAttribute('data-del-variante').split('|');
